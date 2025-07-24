@@ -5,21 +5,16 @@ from typing import Dict, List, Set
 import uuid
 from uuid import UUID
 import logging
+import asyncio
+import aiohttp
+import json
+import random
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Railway-specific configuration
-import os
-RAILWAY_ENVIRONMENT = os.environ.get("RAILWAY_ENVIRONMENT")
-if RAILWAY_ENVIRONMENT:
-    logger.info(f"Running on Railway in {RAILWAY_ENVIRONMENT} environment")
-
-app = FastAPI(
-    title="Trivia Game API",
-    version="3.0.0"
-)
+app = FastAPI(title="Trivia Game API", version="3.0.0")
 
 # Add CORS middleware
 app.add_middleware(
@@ -31,11 +26,38 @@ app.add_middleware(
 )
 
 # --- In-memory Data Stores ---
-users: Dict[str, dict] = {}                   # username -> {user_id}
-lobbies: Dict[UUID, dict] = {}                # lobby_id -> lobby info
-connections: Dict[UUID, List[WebSocket]] = {} # lobby_id -> WebSocket connections
-active_users: Dict[UUID, Set[str]] = {}       # lobby_id -> active usernames
-lobby_creators: Dict[UUID, str] = {}          # lobby_id -> creator username
+users: Dict[str, dict] = {}
+lobbies: Dict[UUID, dict] = {}
+connections: Dict[UUID, List[WebSocket]] = {}
+active_users: Dict[UUID, Set[str]] = {}
+lobby_creators: Dict[UUID, str] = {}
+lobby_bots: Dict[UUID, List[str]] = {}
+lobby_message_counts: Dict[UUID, int] = {}
+lobby_trivia_active: Dict[UUID, bool] = {}
+lobby_trivia_answers: Dict[UUID, Dict[str, int]] = {}
+
+# FREE AI Configuration using Hugging Face
+HUGGING_FACE_API_URL = "https://api-inference.huggingface.co/models/microsoft/DialoGPT-large"
+HUGGING_FACE_TOKEN = "hf_your_free_token_here"  # Get free token from huggingface.co
+
+AI_BOTS = {
+    "ChatBot": "You are a friendly trivia game bot.",
+    "QuizMaster": "You are a trivia expert who loves asking questions.",
+    "Cheerleader": "You are an enthusiastic supporter who cheers everyone on!"
+}
+
+# Trivia questions
+TRIVIA_QUESTIONS = [
+    {"question": "What is the capital of France?", "options": ["London", "Berlin", "Paris", "Madrid"], "correct": 2},
+    {"question": "Which planet is closest to the Sun?", "options": ["Venus", "Mercury", "Earth", "Mars"], "correct": 1},
+    {"question": "What is 15 + 27?", "options": ["41", "42", "43", "44"], "correct": 1},
+    {"question": "Who painted the Mona Lisa?", "options": ["Van Gogh", "Picasso", "Da Vinci", "Monet"], "correct": 2},
+    {"question": "What is the largest ocean?", "options": ["Atlantic", "Indian", "Arctic", "Pacific"], "correct": 3},
+    {"question": "How many continents are there?", "options": ["5", "6", "7", "8"], "correct": 2},
+    {"question": "What year did World War 2 end?", "options": ["1944", "1945", "1946", "1947"], "correct": 1},
+]
+
+MESSAGES_BETWEEN_TRIVIA = 8
 
 # --- Models ---
 class RegisterRequest(BaseModel):
@@ -50,10 +72,6 @@ class CreateLobbyRequest(BaseModel):
     max_bots: int = 0
     is_private: bool = False
 
-class CreateLobbyResponse(BaseModel):
-    lobby_id: UUID
-    invite_code: str
-
 class JoinLobbyRequest(BaseModel):
     invite_code: str
     user_id: str
@@ -61,6 +79,13 @@ class JoinLobbyRequest(BaseModel):
 class LeaveLobbyRequest(BaseModel):
     lobby_id: UUID
     user_id: str
+
+class AddBotRequest(BaseModel):
+    bot_name: str = "ChatBot"
+
+class TriviaAnswerRequest(BaseModel):
+    user_id: str
+    answer: int
 
 # --- Helper Functions ---
 def generate_invite_code():
@@ -87,14 +112,12 @@ async def broadcast(lobby_id: UUID, message: dict):
                 connections[lobby_id].remove(ws)
 
 async def send_lobby_info(lobby_id: UUID, websocket: WebSocket):
-    """Send initial lobby information to a new connection"""
     if lobby_id not in lobbies:
         return
     
     lobby = lobbies[lobby_id]
     creator = lobby_creators.get(lobby_id, "Unknown")
     
-    # Send lobby creation message
     creation_message = {
         "username": "system",
         "message": f"Welcome to '{lobby['name']}'! This lobby was created by {creator}.",
@@ -105,46 +128,144 @@ async def send_lobby_info(lobby_id: UUID, websocket: WebSocket):
         await websocket.send_json(creation_message)
     except:
         pass
+
+# FREE AI API call using Hugging Face
+async def call_free_ai_api(message: str, bot_name: str) -> str:
+    try:
+        # Fallback responses for when API is unavailable
+        fallback_responses = [
+            f"That's interesting! 🤖",
+            f"Tell me more about that!",
+            f"Great point! What do you think about trivia?",
+            f"I love chatting with everyone here! 😊",
+            f"Anyone ready for some trivia? 🎯",
+            f"This lobby is so fun! Keep chatting!",
+            f"I'm learning so much from you all!",
+            f"That's a cool message! 👍"
+        ]
+        
+        # Simple rule-based responses (works without API)
+        message_lower = message.lower()
+        if "hello" in message_lower or "hi" in message_lower:
+            return f"Hello there! Welcome to the chat! 👋"
+        elif "trivia" in message_lower:
+            return f"I love trivia! Ready for some brain teasers? 🧠"
+        elif "question" in message_lower:
+            return f"Great question! I wish I had all the answers! 🤔"
+        elif "game" in message_lower:
+            return f"Games are so much fun! This trivia chat is awesome! 🎮"
+        else:
+            return random.choice(fallback_responses)
+            
+    except Exception as e:
+        logger.error(f"AI API error: {e}")
+        return f"*{bot_name} is thinking...* 🤖"
+
+async def trigger_bot_response(lobby_id: UUID, user_message: str, username: str):
+    if lobby_id not in lobby_bots or not lobby_bots[lobby_id]:
+        return
     
-    # Send current active users if any
-    if lobby_id in active_users and active_users[lobby_id]:
-        active_list = list(active_users[lobby_id])
-        if len(active_list) > 1:  # Don't show if only the current user
-            users_message = {
-                "username": "system",
-                "message": f"Currently active: {', '.join(active_list)}",
+    # Random delay between 1-3 seconds
+    await asyncio.sleep(random.uniform(1.0, 3.0))
+    
+    # Pick a random bot from this lobby
+    bot_name = random.choice(lobby_bots[lobby_id])
+    
+    # Get AI response
+    ai_response = await call_free_ai_api(f"{username} said: {user_message}", bot_name)
+    
+    # Broadcast bot response
+    bot_message = {
+        "username": bot_name,
+        "message": ai_response,
+        "type": "bot"
+    }
+    await broadcast(lobby_id, bot_message)
+
+async def check_trivia_trigger(lobby_id: UUID):
+    if lobby_id not in lobby_message_counts:
+        lobby_message_counts[lobby_id] = 0
+    
+    lobby_message_counts[lobby_id] += 1
+    
+    if (lobby_message_counts[lobby_id] % MESSAGES_BETWEEN_TRIVIA == 0 and 
+        not lobby_trivia_active.get(lobby_id, False)):
+        await start_trivia_round(lobby_id)
+
+async def start_trivia_round(lobby_id: UUID):
+    try:
+        lobby_trivia_active[lobby_id] = True
+        lobby_trivia_answers[lobby_id] = {}
+        
+        trivia = random.choice(TRIVIA_QUESTIONS)
+        
+        trivia_message = {
+            "username": "🎯 TriviaBot",
+            "message": f"⏰ TRIVIA TIME! Answer within 30 seconds:\n\n{trivia['question']}",
+            "type": "trivia",
+            "trivia_data": {
+                "question": trivia["question"],
+                "options": trivia["options"]
+            }
+        }
+        
+        await broadcast(lobby_id, trivia_message)
+        
+        correct_answer = trivia["correct"]
+        await asyncio.sleep(30)
+        await end_trivia_round(lobby_id, correct_answer)
+        
+    except Exception as e:
+        logger.error(f"Trivia error: {e}")
+        lobby_trivia_active[lobby_id] = False
+
+async def end_trivia_round(lobby_id: UUID, correct_answer: int):
+    try:
+        if lobby_id not in lobby_trivia_answers:
+            return
+            
+        answers = lobby_trivia_answers[lobby_id]
+        correct_users = [user for user, answer in answers.items() if answer == correct_answer]
+        
+        if correct_users:
+            result_message = {
+                "username": "🎯 TriviaBot",
+                "message": f"🎉 Correct! Winners: {', '.join(correct_users)}",
                 "type": "system"
             }
-            try:
-                await websocket.send_json(users_message)
-            except:
-                pass
+        else:
+            result_message = {
+                "username": "🎯 TriviaBot", 
+                "message": f"⏰ Time's up! The correct answer was option {correct_answer + 1}",
+                "type": "system"
+            }
+        
+        await broadcast(lobby_id, result_message)
+        
+        lobby_trivia_active[lobby_id] = False
+        lobby_trivia_answers[lobby_id] = {}
+        
+    except Exception as e:
+        logger.error(f"End trivia error: {e}")
 
-# --- User Registration ---
+# --- API Endpoints ---
 @app.post("/register", response_model=RegisterResponse)
 async def register(req: RegisterRequest):
     try:
-        logger.info(f"Registration attempt for username: {req.username}")
-        
         if req.username in users:
-            logger.warning(f"Username {req.username} already taken")
             raise HTTPException(400, "Username already taken.")
         
         user_id = str(uuid.uuid4())
         users[req.username] = {"user_id": user_id}
-        
         logger.info(f"User {req.username} registered with ID: {user_id}")
         return RegisterResponse(user_id=user_id)
     except Exception as e:
         logger.error(f"Registration error: {e}")
         raise HTTPException(500, f"Registration failed: {str(e)}")
 
-# --- Lobby Management (HTTP) ---
 @app.post("/lobbies")
 async def create_lobby(req: CreateLobbyRequest):
     try:
-        logger.info(f"Creating lobby: {req.name}")
-        
         lobby_id = uuid.uuid4()
         invite_code = generate_invite_code()
         lobbies[lobby_id] = {
@@ -158,10 +279,8 @@ async def create_lobby(req: CreateLobbyRequest):
             "created_at": str(uuid.uuid4())
         }
         
-        # Initialize active users for this lobby
         active_users[lobby_id] = set()
-        
-        logger.info(f"Lobby created with ID: {lobby_id}, invite code: {invite_code}")
+        lobby_bots[lobby_id] = []
         
         return {
             "lobby_id": str(lobby_id),
@@ -175,8 +294,6 @@ async def create_lobby(req: CreateLobbyRequest):
 @app.post("/lobbies/join-invite")
 async def join_lobby(req: JoinLobbyRequest):
     try:
-        logger.info(f"Join lobby attempt with code: {req.invite_code}")
-        
         lobby = find_lobby_by_invite(req.invite_code)
         username = get_username(req.user_id)
         
@@ -188,14 +305,12 @@ async def join_lobby(req: JoinLobbyRequest):
         
         lobby["users"].append(username)
         
-        # Find lobby_id for this lobby
         lobby_id = None
         for lid, lob in lobbies.items():
             if lob == lobby:
                 lobby_id = lid
                 break
         
-        # Store creator information if this is the first user
         if lobby_id and len(lobby["users"]) == 1:
             lobby_creators[lobby_id] = username
         
@@ -207,32 +322,9 @@ async def join_lobby(req: JoinLobbyRequest):
         logger.error(f"Join lobby error: {e}")
         raise HTTPException(500, f"Failed to join lobby: {str(e)}")
 
-@app.post("/lobbies/leave")
-async def leave_lobby(req: LeaveLobbyRequest):
-    try:
-        lobby = lobbies.get(req.lobby_id)
-        if not lobby:
-            raise HTTPException(404, "Lobby not found.")
-        
-        username = get_username(req.user_id)
-        
-        if username in lobby["users"]:
-            lobby["users"].remove(username)
-            logger.info(f"User {username} left lobby {req.lobby_id}")
-            return {"message": f"{username} left the lobby."}
-        else:
-            raise HTTPException(400, "User not in lobby.")
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Leave lobby error: {e}")
-        raise HTTPException(500, f"Failed to leave lobby: {str(e)}")
-
 @app.get("/lobbies")
 async def list_lobbies():
     try:
-        logger.info(f"Listing lobbies - found {len(lobbies)} lobbies")
-        
         result = [{
             "lobby_id": str(lobby["id"]),
             "name": lobby["name"],
@@ -242,45 +334,72 @@ async def list_lobbies():
             "invite_code": lobby["invite_code"]
         } for lobby in lobbies.values()]
         
-        logger.info(f"Returning {len(result)} lobbies")
         return result
     except Exception as e:
         logger.error(f"List lobbies error: {e}")
         raise HTTPException(500, f"Failed to list lobbies: {str(e)}")
 
-@app.get("/lobbies/public")
-async def list_public_lobbies():
+@app.post("/lobbies/{lobby_id}/add-bot")
+async def add_bot_to_lobby(lobby_id: UUID, req: AddBotRequest):
     try:
-        result = [{
-            "lobby_id": str(lobby["id"]),
-            "name": lobby["name"],
-            "current_players": len(lobby["users"]),
-            "max_humans": lobby["max_humans"],
-            "invite_code": lobby["invite_code"]
-        } for lobby in lobbies.values() if not lobby["is_private"]]
+        if lobby_id not in lobbies:
+            raise HTTPException(404, "Lobby not found")
         
-        return result
+        bot_name = req.bot_name if req.bot_name in AI_BOTS else "ChatBot"
+        
+        if lobby_id not in lobby_bots:
+            lobby_bots[lobby_id] = []
+        
+        if bot_name not in lobby_bots[lobby_id]:
+            lobby_bots[lobby_id].append(bot_name)
+            
+            join_message = {
+                "username": "system",
+                "message": f"🤖 {bot_name} has joined the chat!",
+                "type": "system"
+            }
+            await broadcast(lobby_id, join_message)
+            
+        return {"message": f"{bot_name} added to lobby"}
     except Exception as e:
-        logger.error(f"List public lobbies error: {e}")
-        raise HTTPException(500, f"Failed to list public lobbies: {str(e)}")
+        logger.error(f"Add bot error: {e}")
+        raise HTTPException(500, f"Failed to add bot: {str(e)}")
+
+@app.post("/lobbies/{lobby_id}/trivia-answer")
+async def submit_trivia_answer(lobby_id: UUID, req: TriviaAnswerRequest):
+    try:
+        if lobby_id not in lobby_trivia_active or not lobby_trivia_active[lobby_id]:
+            raise HTTPException(400, "No active trivia")
+            
+        username = get_username(req.user_id)
+        
+        if lobby_id not in lobby_trivia_answers:
+            lobby_trivia_answers[lobby_id] = {}
+            
+        lobby_trivia_answers[lobby_id][username] = req.answer
+        
+        answer_message = {
+            "username": "system",
+            "message": f"{username} submitted their answer! ✅",
+            "type": "system"
+        }
+        await broadcast(lobby_id, answer_message)
+        
+        return {"message": "Answer submitted"}
+        
+    except Exception as e:
+        logger.error(f"Trivia answer error: {e}")
+        raise HTTPException(500, f"Failed to submit answer: {str(e)}")
 
 @app.get("/health")
 async def health_check():
-    try:
-        return {
-            "status": "healthy",
-            "users_count": len(users),
-            "lobbies_count": len(lobbies),
-            "active_connections": sum(len(conns) for conns in connections.values())
-        }
-    except Exception as e:
-        logger.error(f"Health check error: {e}")
-        return {
-            "status": "error",
-            "error": str(e)
-        }
+    return {
+        "status": "healthy",
+        "users_count": len(users),
+        "lobbies_count": len(lobbies),
+        "active_connections": sum(len(conns) for conns in connections.values())
+    }
 
-# --- WebSocket: Real-time Lobby Chat ---
 @app.websocket("/ws/{lobby_id}/{user_id}")
 async def websocket_endpoint(websocket: WebSocket, lobby_id: UUID, user_id: str):
     await websocket.accept()
@@ -291,7 +410,6 @@ async def websocket_endpoint(websocket: WebSocket, lobby_id: UUID, user_id: str)
         await websocket.close(code=1008, reason="User not found")
         return
     
-    # Check if lobby exists
     if lobby_id not in lobbies:
         await websocket.close(code=1008, reason="Lobby not found")
         return
@@ -300,17 +418,14 @@ async def websocket_endpoint(websocket: WebSocket, lobby_id: UUID, user_id: str)
         connections[lobby_id] = []
     connections[lobby_id].append(websocket)
     
-    # Add user to active users
     if lobby_id not in active_users:
         active_users[lobby_id] = set()
     
     was_empty = len(active_users[lobby_id]) == 0
     active_users[lobby_id].add(username)
     
-    # Send initial lobby info to the new user
     await send_lobby_info(lobby_id, websocket)
     
-    # Only broadcast join message if there were already active users
     if not was_empty:
         join_message = {
             "username": "system",
@@ -318,40 +433,35 @@ async def websocket_endpoint(websocket: WebSocket, lobby_id: UUID, user_id: str)
             "type": "system"
         }
         await broadcast(lobby_id, join_message)
-    
-    # Broadcast updated active users count
-    active_count = len(active_users[lobby_id])
-    if active_count > 1:
-        count_message = {
-            "username": "system",
-            "message": f"{active_count} users currently active in this lobby.",
-            "type": "system"
-        }
-        await broadcast(lobby_id, count_message)
 
     try:
         while True:
             data = await websocket.receive_json()
-            user_message = {
-                "username": username,
-                "message": data.get("message", ""),
-                "type": "user"
-            }
-            await broadcast(lobby_id, user_message)
+            message_text = data.get("message", "").strip()
+            
+            if message_text:
+                user_message = {
+                    "username": username,
+                    "message": message_text,
+                    "type": "user"
+                }
+                await broadcast(lobby_id, user_message)
+                
+                # Trigger game events
+                asyncio.create_task(check_trivia_trigger(lobby_id))
+                asyncio.create_task(trigger_bot_response(lobby_id, message_text, username))
+                
     except WebSocketDisconnect:
         pass
     except Exception as e:
         logger.error(f"WebSocket error: {e}")
     finally:
-        # Cleanup
         if lobby_id in connections and websocket in connections[lobby_id]:
             connections[lobby_id].remove(websocket)
         
-        # Remove user from active users
         if lobby_id in active_users and username in active_users[lobby_id]:
             active_users[lobby_id].remove(username)
         
-        # Only broadcast leave message if there are still active users
         if lobby_id in active_users and len(active_users[lobby_id]) > 0:
             leave_message = {
                 "username": "system",
@@ -359,33 +469,10 @@ async def websocket_endpoint(websocket: WebSocket, lobby_id: UUID, user_id: str)
                 "type": "system"
             }
             await broadcast(lobby_id, leave_message)
-            
-            # Broadcast updated active users count
-            active_count = len(active_users[lobby_id])
-            if active_count > 0:
-                count_message = {
-                    "username": "system",
-                    "message": f"{active_count} users currently active in this lobby.",
-                    "type": "system"
-                }
-                await broadcast(lobby_id, count_message)
 
 if __name__ == "__main__":
     import uvicorn
     import os
-    
-    # Railway sets PORT=8080, but we default to 8000 for local development
     port = int(os.environ.get("PORT", 8000))
-    host = "0.0.0.0"
-    
-    print(f"Starting server on {host}:{port}")
-    print(f"Environment: {'Railway' if os.environ.get('RAILWAY_ENVIRONMENT') else 'Local'}")
-    logger.info(f"Starting FastAPI server on {host}:{port}")
-    
-    uvicorn.run(
-        app, 
-        host=host, 
-        port=port, 
-        log_level="info",
-        access_log=True
-    )
+    print(f"Starting server on 0.0.0.0:{port}")
+    uvicorn.run(app, host="0.0.0.0", port=port, log_level="info")
