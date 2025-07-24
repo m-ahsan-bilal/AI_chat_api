@@ -4,6 +4,17 @@ from pydantic import BaseModel
 from typing import Dict, List, Set
 import uuid
 from uuid import UUID
+import logging
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Railway-specific configuration
+import os
+RAILWAY_ENVIRONMENT = os.environ.get("RAILWAY_ENVIRONMENT")
+if RAILWAY_ENVIRONMENT:
+    logger.info(f"Running on Railway in {RAILWAY_ENVIRONMENT} environment")
 
 app = FastAPI(
     title="Trivia Game API",
@@ -111,108 +122,163 @@ async def send_lobby_info(lobby_id: UUID, websocket: WebSocket):
 
 # --- User Registration ---
 @app.post("/register", response_model=RegisterResponse)
-def register(req: RegisterRequest):
-    if req.username in users:
-        raise HTTPException(400, "Username already taken.")
-    
-    user_id = str(uuid.uuid4())
-    users[req.username] = {"user_id": user_id}
-    return RegisterResponse(user_id=user_id)
+async def register(req: RegisterRequest):
+    try:
+        logger.info(f"Registration attempt for username: {req.username}")
+        
+        if req.username in users:
+            logger.warning(f"Username {req.username} already taken")
+            raise HTTPException(400, "Username already taken.")
+        
+        user_id = str(uuid.uuid4())
+        users[req.username] = {"user_id": user_id}
+        
+        logger.info(f"User {req.username} registered with ID: {user_id}")
+        return RegisterResponse(user_id=user_id)
+    except Exception as e:
+        logger.error(f"Registration error: {e}")
+        raise HTTPException(500, f"Registration failed: {str(e)}")
 
 # --- Lobby Management (HTTP) ---
 @app.post("/lobbies")
-def create_lobby(req: CreateLobbyRequest):
-    lobby_id = uuid.uuid4()
-    invite_code = generate_invite_code()
-    lobbies[lobby_id] = {
-        "id": lobby_id,
-        "name": req.name,
-        "max_humans": req.max_humans,
-        "max_bots": req.max_bots,
-        "is_private": req.is_private,
-        "users": [],
-        "invite_code": invite_code,
-        "created_at": str(uuid.uuid4())
-    }
-    
-    # Initialize active users for this lobby
-    active_users[lobby_id] = set()
-    
-    return {
-        "lobby_id": str(lobby_id),
-        "invite_code": invite_code,
-        "name": req.name
-    }
+async def create_lobby(req: CreateLobbyRequest):
+    try:
+        logger.info(f"Creating lobby: {req.name}")
+        
+        lobby_id = uuid.uuid4()
+        invite_code = generate_invite_code()
+        lobbies[lobby_id] = {
+            "id": lobby_id,
+            "name": req.name,
+            "max_humans": req.max_humans,
+            "max_bots": req.max_bots,
+            "is_private": req.is_private,
+            "users": [],
+            "invite_code": invite_code,
+            "created_at": str(uuid.uuid4())
+        }
+        
+        # Initialize active users for this lobby
+        active_users[lobby_id] = set()
+        
+        logger.info(f"Lobby created with ID: {lobby_id}, invite code: {invite_code}")
+        
+        return {
+            "lobby_id": str(lobby_id),
+            "invite_code": invite_code,
+            "name": req.name
+        }
+    except Exception as e:
+        logger.error(f"Create lobby error: {e}")
+        raise HTTPException(500, f"Failed to create lobby: {str(e)}")
 
 @app.post("/lobbies/join-invite")
-def join_lobby(req: JoinLobbyRequest):
-    lobby = find_lobby_by_invite(req.invite_code)
-    username = get_username(req.user_id)
-    
-    if username in lobby["users"]:
-        raise HTTPException(400, "User already in lobby.")
-    
-    if len(lobby["users"]) >= lobby["max_humans"]:
-        raise HTTPException(400, "Lobby is full.")
-    
-    lobby["users"].append(username)
-    
-    # Find lobby_id for this lobby
-    lobby_id = None
-    for lid, lob in lobbies.items():
-        if lob == lobby:
-            lobby_id = lid
-            break
-    
-    # Store creator information if this is the first user
-    if lobby_id and len(lobby["users"]) == 1:
-        lobby_creators[lobby_id] = username
-    
-    return {"message": f"{username} joined the lobby."}
+async def join_lobby(req: JoinLobbyRequest):
+    try:
+        logger.info(f"Join lobby attempt with code: {req.invite_code}")
+        
+        lobby = find_lobby_by_invite(req.invite_code)
+        username = get_username(req.user_id)
+        
+        if username in lobby["users"]:
+            raise HTTPException(400, "User already in lobby.")
+        
+        if len(lobby["users"]) >= lobby["max_humans"]:
+            raise HTTPException(400, "Lobby is full.")
+        
+        lobby["users"].append(username)
+        
+        # Find lobby_id for this lobby
+        lobby_id = None
+        for lid, lob in lobbies.items():
+            if lob == lobby:
+                lobby_id = lid
+                break
+        
+        # Store creator information if this is the first user
+        if lobby_id and len(lobby["users"]) == 1:
+            lobby_creators[lobby_id] = username
+        
+        logger.info(f"User {username} joined lobby {lobby_id}")
+        return {"message": f"{username} joined the lobby."}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Join lobby error: {e}")
+        raise HTTPException(500, f"Failed to join lobby: {str(e)}")
 
 @app.post("/lobbies/leave")
-def leave_lobby(req: LeaveLobbyRequest):
-    lobby = lobbies.get(req.lobby_id)
-    if not lobby:
-        raise HTTPException(404, "Lobby not found.")
-    
-    username = get_username(req.user_id)
-    
-    if username in lobby["users"]:
-        lobby["users"].remove(username)
-        return {"message": f"{username} left the lobby."}
-    else:
-        raise HTTPException(400, "User not in lobby.")
+async def leave_lobby(req: LeaveLobbyRequest):
+    try:
+        lobby = lobbies.get(req.lobby_id)
+        if not lobby:
+            raise HTTPException(404, "Lobby not found.")
+        
+        username = get_username(req.user_id)
+        
+        if username in lobby["users"]:
+            lobby["users"].remove(username)
+            logger.info(f"User {username} left lobby {req.lobby_id}")
+            return {"message": f"{username} left the lobby."}
+        else:
+            raise HTTPException(400, "User not in lobby.")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Leave lobby error: {e}")
+        raise HTTPException(500, f"Failed to leave lobby: {str(e)}")
 
 @app.get("/lobbies")
-def list_lobbies():
-    return [{
-        "lobby_id": str(lobby["id"]),
-        "name": lobby["name"],
-        "current_players": len(lobby["users"]),
-        "max_humans": lobby["max_humans"],
-        "is_private": lobby["is_private"],
-        "invite_code": lobby["invite_code"]
-    } for lobby in lobbies.values()]
+async def list_lobbies():
+    try:
+        logger.info(f"Listing lobbies - found {len(lobbies)} lobbies")
+        
+        result = [{
+            "lobby_id": str(lobby["id"]),
+            "name": lobby["name"],
+            "current_players": len(lobby["users"]),
+            "max_humans": lobby["max_humans"],
+            "is_private": lobby["is_private"],
+            "invite_code": lobby["invite_code"]
+        } for lobby in lobbies.values()]
+        
+        logger.info(f"Returning {len(result)} lobbies")
+        return result
+    except Exception as e:
+        logger.error(f"List lobbies error: {e}")
+        raise HTTPException(500, f"Failed to list lobbies: {str(e)}")
 
 @app.get("/lobbies/public")
-def list_public_lobbies():
-    return [{
-        "lobby_id": str(lobby["id"]),
-        "name": lobby["name"],
-        "current_players": len(lobby["users"]),
-        "max_humans": lobby["max_humans"],
-        "invite_code": lobby["invite_code"]
-    } for lobby in lobbies.values() if not lobby["is_private"]]
+async def list_public_lobbies():
+    try:
+        result = [{
+            "lobby_id": str(lobby["id"]),
+            "name": lobby["name"],
+            "current_players": len(lobby["users"]),
+            "max_humans": lobby["max_humans"],
+            "invite_code": lobby["invite_code"]
+        } for lobby in lobbies.values() if not lobby["is_private"]]
+        
+        return result
+    except Exception as e:
+        logger.error(f"List public lobbies error: {e}")
+        raise HTTPException(500, f"Failed to list public lobbies: {str(e)}")
 
 @app.get("/health")
-def health_check():
-    return {
-        "status": "healthy",
-        "users_count": len(users),
-        "lobbies_count": len(lobbies),
-        "active_connections": sum(len(conns) for conns in connections.values())
-    }
+async def health_check():
+    try:
+        return {
+            "status": "healthy",
+            "users_count": len(users),
+            "lobbies_count": len(lobbies),
+            "active_connections": sum(len(conns) for conns in connections.values())
+        }
+    except Exception as e:
+        logger.error(f"Health check error: {e}")
+        return {
+            "status": "error",
+            "error": str(e)
+        }
 
 # --- WebSocket: Real-time Lobby Chat ---
 @app.websocket("/ws/{lobby_id}/{user_id}")
@@ -275,7 +341,7 @@ async def websocket_endpoint(websocket: WebSocket, lobby_id: UUID, user_id: str)
     except WebSocketDisconnect:
         pass
     except Exception as e:
-        print(f"WebSocket error: {e}")
+        logger.error(f"WebSocket error: {e}")
     finally:
         # Cleanup
         if lobby_id in connections and websocket in connections[lobby_id]:
@@ -307,5 +373,19 @@ async def websocket_endpoint(websocket: WebSocket, lobby_id: UUID, user_id: str)
 if __name__ == "__main__":
     import uvicorn
     import os
+    
+    # Railway sets PORT=8080, but we default to 8000 for local development
     port = int(os.environ.get("PORT", 8000))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    host = "0.0.0.0"
+    
+    print(f"Starting server on {host}:{port}")
+    print(f"Environment: {'Railway' if os.environ.get('RAILWAY_ENVIRONMENT') else 'Local'}")
+    logger.info(f"Starting FastAPI server on {host}:{port}")
+    
+    uvicorn.run(
+        app, 
+        host=host, 
+        port=port, 
+        log_level="info",
+        access_log=True
+    )
