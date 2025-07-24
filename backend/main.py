@@ -1,7 +1,7 @@
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
-from fastapi.middleware.cors import CORSMiddleware  # Add this import
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import Dict, List
+from typing import Dict, List, Set
 import uuid
 from uuid import UUID
 
@@ -10,10 +10,10 @@ app = FastAPI(
     version="3.0.0"
 )
 
-# Add CORS middleware - THIS IS CRUCIAL FOR WEB TESTING
+# Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # In production, specify your domains
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -23,7 +23,8 @@ app.add_middleware(
 users: Dict[str, dict] = {}                   # username -> {user_id}
 lobbies: Dict[UUID, dict] = {}                # lobby_id -> lobby info
 connections: Dict[UUID, List[WebSocket]] = {} # lobby_id -> WebSocket connections
-chat_history: Dict[UUID, List[Dict]] = {}     # lobby_id -> chat messages
+active_users: Dict[UUID, Set[str]] = {}       # lobby_id -> active usernames
+lobby_creators: Dict[UUID, str] = {}          # lobby_id -> creator username
 
 # --- Models ---
 class RegisterRequest(BaseModel):
@@ -68,12 +69,45 @@ def get_username(user_id: str):
 
 async def broadcast(lobby_id: UUID, message: dict):
     if lobby_id in connections:
-        for ws in connections[lobby_id][:]:  # Create a copy to avoid modification during iteration
+        for ws in connections[lobby_id][:]:
             try:
                 await ws.send_json(message)
             except:
-                # Remove dead connections
                 connections[lobby_id].remove(ws)
+
+async def send_lobby_info(lobby_id: UUID, websocket: WebSocket):
+    """Send initial lobby information to a new connection"""
+    if lobby_id not in lobbies:
+        return
+    
+    lobby = lobbies[lobby_id]
+    creator = lobby_creators.get(lobby_id, "Unknown")
+    
+    # Send lobby creation message
+    creation_message = {
+        "username": "system",
+        "message": f"Welcome to '{lobby['name']}'! This lobby was created by {creator}.",
+        "type": "system"
+    }
+    
+    try:
+        await websocket.send_json(creation_message)
+    except:
+        pass
+    
+    # Send current active users if any
+    if lobby_id in active_users and active_users[lobby_id]:
+        active_list = list(active_users[lobby_id])
+        if len(active_list) > 1:  # Don't show if only the current user
+            users_message = {
+                "username": "system",
+                "message": f"Currently active: {', '.join(active_list)}",
+                "type": "system"
+            }
+            try:
+                await websocket.send_json(users_message)
+            except:
+                pass
 
 # --- User Registration ---
 @app.post("/register", response_model=RegisterResponse)
@@ -98,13 +132,12 @@ def create_lobby(req: CreateLobbyRequest):
         "is_private": req.is_private,
         "users": [],
         "invite_code": invite_code,
-        "created_at": str(uuid.uuid4())  # Add timestamp-like field
+        "created_at": str(uuid.uuid4())
     }
-    chat_history[lobby_id] = [{
-        "username": "system",
-        "message": f"Lobby '{req.name}' created.",
-        "type": "system"
-    }]
+    
+    # Initialize active users for this lobby
+    active_users[lobby_id] = set()
+    
     return {
         "lobby_id": str(lobby_id),
         "invite_code": invite_code,
@@ -123,6 +156,18 @@ def join_lobby(req: JoinLobbyRequest):
         raise HTTPException(400, "Lobby is full.")
     
     lobby["users"].append(username)
+    
+    # Find lobby_id for this lobby
+    lobby_id = None
+    for lid, lob in lobbies.items():
+        if lob == lobby:
+            lobby_id = lid
+            break
+    
+    # Store creator information if this is the first user
+    if lobby_id and len(lobby["users"]) == 1:
+        lobby_creators[lobby_id] = username
+    
     return {"message": f"{username} joined the lobby."}
 
 @app.post("/lobbies/leave")
@@ -160,7 +205,6 @@ def list_public_lobbies():
         "invite_code": lobby["invite_code"]
     } for lobby in lobbies.values() if not lobby["is_private"]]
 
-# Add a simple health check endpoint
 @app.get("/health")
 def health_check():
     return {
@@ -190,32 +234,34 @@ async def websocket_endpoint(websocket: WebSocket, lobby_id: UUID, user_id: str)
         connections[lobby_id] = []
     connections[lobby_id].append(websocket)
     
-    # Send chat history to new user (only system messages initially)
-    for msg in chat_history.get(lobby_id, []):
-        if msg['type'] == "system":
-            try:
-                await websocket.send_json(msg)
-            except:
-                break
+    # Add user to active users
+    if lobby_id not in active_users:
+        active_users[lobby_id] = set()
     
-    # Notify others of new join
-    join_message = {
-        "username": "system",
-        "message": f"{username} joined the chat.",
-        "type": "system"
-    }
-    if lobby_id not in chat_history:
-        chat_history[lobby_id] = []
-    chat_history[lobby_id].append(join_message)
-    await broadcast(lobby_id, join_message)
+    was_empty = len(active_users[lobby_id]) == 0
+    active_users[lobby_id].add(username)
     
-    # Broadcast lobby user list
-    user_list_message = {
-        "username": "system",
-        "message": f"Players in lobby: {', '.join(lobbies[lobby_id]['users'])}",
-        "type": "system"
-    }
-    await broadcast(lobby_id, user_list_message)
+    # Send initial lobby info to the new user
+    await send_lobby_info(lobby_id, websocket)
+    
+    # Only broadcast join message if there were already active users
+    if not was_empty:
+        join_message = {
+            "username": "system",
+            "message": f"{username} joined the chat.",
+            "type": "system"
+        }
+        await broadcast(lobby_id, join_message)
+    
+    # Broadcast updated active users count
+    active_count = len(active_users[lobby_id])
+    if active_count > 1:
+        count_message = {
+            "username": "system",
+            "message": f"{active_count} users currently active in this lobby.",
+            "type": "system"
+        }
+        await broadcast(lobby_id, count_message)
 
     try:
         while True:
@@ -225,7 +271,6 @@ async def websocket_endpoint(websocket: WebSocket, lobby_id: UUID, user_id: str)
                 "message": data.get("message", ""),
                 "type": "user"
             }
-            chat_history[lobby_id].append(user_message)
             await broadcast(lobby_id, user_message)
     except WebSocketDisconnect:
         pass
@@ -236,28 +281,31 @@ async def websocket_endpoint(websocket: WebSocket, lobby_id: UUID, user_id: str)
         if lobby_id in connections and websocket in connections[lobby_id]:
             connections[lobby_id].remove(websocket)
         
-        # Remove user from lobby
-        if lobby_id in lobbies and username in lobbies[lobby_id]["users"]:
-            lobbies[lobby_id]["users"].remove(username)
+        # Remove user from active users
+        if lobby_id in active_users and username in active_users[lobby_id]:
+            active_users[lobby_id].remove(username)
         
-        leave_message = {
-            "username": "system",
-            "message": f"{username} left the chat.",
-            "type": "system"
-        }
-        if lobby_id in chat_history:
-            chat_history[lobby_id].append(leave_message)
-        await broadcast(lobby_id, leave_message)
-        
-        # Broadcast updated player list
-        if lobby_id in lobbies:
-            updated_list_message = {
+        # Only broadcast leave message if there are still active users
+        if lobby_id in active_users and len(active_users[lobby_id]) > 0:
+            leave_message = {
                 "username": "system",
-                "message": f"Players in lobby: {', '.join(lobbies[lobby_id]['users'])}",
+                "message": f"{username} left the chat.",
                 "type": "system"
             }
-            await broadcast(lobby_id, updated_list_message)
+            await broadcast(lobby_id, leave_message)
+            
+            # Broadcast updated active users count
+            active_count = len(active_users[lobby_id])
+            if active_count > 0:
+                count_message = {
+                    "username": "system",
+                    "message": f"{active_count} users currently active in this lobby.",
+                    "type": "system"
+                }
+                await broadcast(lobby_id, count_message)
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    import os
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run(app, host="0.0.0.0", port=port)
