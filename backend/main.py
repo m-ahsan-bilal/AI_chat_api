@@ -953,6 +953,6 @@ if __name__ == "__main__":
     print(f"\n🌐 Starting server...")
     print("="*60 + "\n")
     
-    port = int(os.environ.get("PORT", 8000))
+    port = int(os.environ.get("PORT", 8080))
     logger.info("Starting server on 0.0.0.0:%d", port)
     uvicorn.run(app, host="0.0.0.0", port=port, log_level="info")
