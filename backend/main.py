@@ -671,8 +671,17 @@ async def submit_trivia_answer(lobby_id: UUID, req: TriviaAnswerRequest):
 
     return {"message": "Answer submitted"}
 
+# -----------------------------------------------------------------------------
+# Health Check Endpoints (for Railway and detailed status)
+# -----------------------------------------------------------------------------
 @app.get("/health")
-async def health():
+async def health_minimal():
+    """Minimal health check for Railway and cloud platforms"""
+    return {"status": "ok"}
+
+@app.get("/healthz")
+async def health_detailed():
+    """Detailed health check (was previously /health)"""
     return {
         "status": "healthy",
         "users": len(users),
