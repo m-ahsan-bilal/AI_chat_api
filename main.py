@@ -93,14 +93,14 @@ AI_BOTS = {
 # In-memory Stores
 # -----------------------------------------------------------------------------
 users: Dict[str, dict] = {}                       # username -> {user_id}
-lobbies: Dict[UUID, dict] = {}                    # lobby_id -> lobby info
-connections: Dict[UUID, List[WebSocket]] = {}     # lobby_id -> websocket list
-active_users: Dict[UUID, Set[str]] = {}           # lobby_id -> active usernames set
-lobby_creators: Dict[UUID, str] = {}              # lobby_id -> username
-lobby_bots: Dict[UUID, List[str]] = {}            # lobby_id -> list of bot names
-lobby_message_counts: Dict[UUID, int] = {}        # lobby_id -> int
-lobby_trivia_active: Dict[UUID, bool] = {}        # lobby_id -> bool
-lobby_trivia_answers: Dict[UUID, Dict[str, int]] = {}  # lobby_id -> {username: answer_index}
+lobbies: Dict[str, dict] = {}                     # lobby_id -> lobby info (Changed from UUID to str)
+connections: Dict[str, List[WebSocket]] = {}      # lobby_id -> websocket list
+active_users: Dict[str, Set[str]] = {}            # lobby_id -> active usernames set
+lobby_creators: Dict[str, str] = {}               # lobby_id -> username
+lobby_bots: Dict[str, List[str]] = {}             # lobby_id -> list of bot names
+lobby_message_counts: Dict[str, int] = {}         # lobby_id -> int
+lobby_trivia_active: Dict[str, bool] = {}         # lobby_id -> bool
+lobby_trivia_answers: Dict[str, Dict[str, int]] = {}  # lobby_id -> {username: answer_index}
 bot_conversation_history: Dict[str, List[dict]] = {}  # bot_name -> conversation history
 
 # -----------------------------------------------------------------------------
@@ -319,7 +319,7 @@ async def get_ai_response(bot_name: str, user_message: str, username: str) -> st
 # -----------------------------------------------------------------------------
 # Bot Reply Function (Updated)
 # -----------------------------------------------------------------------------
-async def trigger_bot_reply(lobby_id: UUID, user_message: str, human_username: str):
+async def trigger_bot_reply(lobby_id: str, user_message: str, human_username: str):
     """Trigger bot replies with AI integration"""
     bots = lobby_bots.get(lobby_id, [])
     if not bots:
@@ -360,7 +360,7 @@ async def trigger_bot_reply(lobby_id: UUID, user_message: str, human_username: s
         })
 
 # -----------------------------------------------------------------------------
-# Pydantic Models
+# Pydantic Models (Fixed)
 # -----------------------------------------------------------------------------
 class RegisterRequest(BaseModel):
     username: str
@@ -384,11 +384,11 @@ class JoinLobbyByInviteRequest(BaseModel):
     user_id: str
 
 class JoinLobbyPublicRequest(BaseModel):
-    lobby_id: UUID
+    lobby_id: str  # Changed from UUID to str
     user_id: str
 
 class LeaveLobbyRequest(BaseModel):
-    lobby_id: UUID
+    lobby_id: str  # Changed from UUID to str
     user_id: str
 
 class AddBotRequest(BaseModel):
@@ -399,7 +399,7 @@ class TriviaAnswerRequest(BaseModel):
     answer: int
 
 # -----------------------------------------------------------------------------
-# Helpers
+# Helpers (Fixed)
 # -----------------------------------------------------------------------------
 def generate_invite_code() -> str:
     return str(uuid.uuid4())[:6].upper()
@@ -410,13 +410,13 @@ def get_username(user_id: str) -> str:
             return username
     raise HTTPException(404, "User not found")
 
-def find_lobby_by_invite(invite_code: str) -> UUID:
+def find_lobby_by_invite(invite_code: str) -> str:  # Changed return type to str
     for lid, lobby in lobbies.items():
         if lobby["invite_code"] == invite_code:
             return lid
     raise HTTPException(404, "Lobby not found")
 
-async def broadcast(lobby_id: UUID, message: dict):
+async def broadcast(lobby_id: str, message: dict):
     """Broadcast a JSON message to everyone in the lobby."""
     if lobby_id not in connections:
         return
@@ -430,7 +430,7 @@ async def broadcast(lobby_id: UUID, message: dict):
             except ValueError:
                 pass
 
-async def send_lobby_welcome(lobby_id: UUID, websocket: WebSocket):
+async def send_lobby_welcome(lobby_id: str, websocket: WebSocket):
     lobby = lobbies.get(lobby_id)
     if not lobby:
         return
@@ -447,16 +447,16 @@ async def send_lobby_welcome(lobby_id: UUID, websocket: WebSocket):
         pass
 
 # -----------------------------------------------------------------------------
-# Trivia Functions (Updated)
+# Trivia Functions (Fixed)
 # -----------------------------------------------------------------------------
-async def maybe_trigger_trivia(lobby_id: UUID):
+async def maybe_trigger_trivia(lobby_id: str):
     lobby_message_counts[lobby_id] = lobby_message_counts.get(lobby_id, 0) + 1
 
     if (lobby_message_counts[lobby_id] % MESSAGES_BETWEEN_TRIVIA == 0
         and not lobby_trivia_active.get(lobby_id, False)):
         await start_trivia_round(lobby_id)
 
-async def start_trivia_round(lobby_id: UUID):
+async def start_trivia_round(lobby_id: str):
     try:
         lobby_trivia_active[lobby_id] = True
         lobby_trivia_answers[lobby_id] = {}
@@ -484,7 +484,7 @@ async def start_trivia_round(lobby_id: UUID):
         logger.exception("start_trivia_round error")
         lobby_trivia_active[lobby_id] = False
 
-async def end_trivia_round(lobby_id: UUID, correct_answer_index: int):
+async def end_trivia_round(lobby_id: str, correct_answer_index: int):
     try:
         answers = lobby_trivia_answers.get(lobby_id, {})
         winners = [u for u, a in answers.items() if a == correct_answer_index]
@@ -517,7 +517,7 @@ async def end_trivia_round(lobby_id: UUID, correct_answer_index: int):
         lobby_trivia_answers[lobby_id] = {}
 
 # -----------------------------------------------------------------------------
-# REST Endpoints (Updated)
+# REST Endpoints (Fixed)
 # -----------------------------------------------------------------------------
 @app.post("/register", response_model=RegisterResponse)
 async def register(req: RegisterRequest):
@@ -531,7 +531,7 @@ async def register(req: RegisterRequest):
 
 @app.post("/lobbies", response_model=CreateLobbyResponse)
 async def create_lobby(req: CreateLobbyRequest):
-    lobby_id = uuid.uuid4()
+    lobby_id = str(uuid.uuid4())  # Convert to string
     invite_code = generate_invite_code()
 
     lobbies[lobby_id] = {
@@ -552,7 +552,7 @@ async def create_lobby(req: CreateLobbyRequest):
     lobby_trivia_answers[lobby_id] = {}
 
     logger.info("Created lobby=%s (private=%s)", lobby_id, req.is_private)
-    return CreateLobbyResponse(lobby_id=str(lobby_id), invite_code=invite_code, name=req.name)
+    return CreateLobbyResponse(lobby_id=lobby_id, invite_code=invite_code, name=req.name)
 
 @app.get("/lobbies")
 async def list_lobbies():
@@ -561,7 +561,7 @@ async def list_lobbies():
     for lobby in lobbies.values():
         if not lobby.get("is_private", False):
             public_lobbies.append({
-                "lobby_id": str(lobby["id"]),
+                "lobby_id": lobby["id"],
                 "name": lobby["name"],
                 "current_players": len(lobby["users"]),
                 "max_humans": lobby["max_humans"],
@@ -569,9 +569,12 @@ async def list_lobbies():
                 "max_bots": lobby["max_bots"],
                 "is_private": lobby["is_private"],
                 "has_trivia_active": lobby_trivia_active.get(lobby["id"], False),
-                "message_count": lobby_message_counts.get(lobby["id"], 0)
+                "message_count": lobby_message_counts.get(lobby["id"], 0),
+                "created_at": lobby.get("created_at", "")
             })
-    return public_lobbies
+    
+    logger.info(f"Returning {len(public_lobbies)} public lobbies")
+    return {"lobbies": public_lobbies}  # Wrap in object for better API structure
 
 @app.post("/lobbies/join-invite")
 async def join_lobby_with_invite(req: JoinLobbyByInviteRequest):
@@ -584,7 +587,7 @@ async def join_public_lobby(req: JoinLobbyPublicRequest):
         raise HTTPException(404, "Lobby not found")
     return await _join_lobby_core(req.lobby_id, req.user_id)
 
-async def _join_lobby_core(lobby_id: UUID, user_id: str):
+async def _join_lobby_core(lobby_id: str, user_id: str):
     lobby = lobbies.get(lobby_id)
     if not lobby:
         raise HTTPException(404, "Lobby not found")
@@ -592,7 +595,7 @@ async def _join_lobby_core(lobby_id: UUID, user_id: str):
     username = get_username(user_id)
 
     if username in lobby["users"]:
-        return {"message": f"{username} rejoined the lobby.", "lobby_id": str(lobby_id)}
+        return {"message": f"{username} rejoined the lobby.", "lobby_id": lobby_id}
 
     if len(lobby["users"]) >= lobby["max_humans"]:
         raise HTTPException(400, "Lobby is full.")
@@ -603,7 +606,7 @@ async def _join_lobby_core(lobby_id: UUID, user_id: str):
         lobby_creators[lobby_id] = username
 
     logger.info("User=%s joined lobby=%s", username, lobby_id)
-    return {"message": f"{username} joined the lobby.", "lobby_id": str(lobby_id)}
+    return {"message": f"{username} joined the lobby.", "lobby_id": lobby_id}
 
 @app.post("/lobbies/leave")
 async def leave_lobby(req: LeaveLobbyRequest):
@@ -621,7 +624,7 @@ async def leave_lobby(req: LeaveLobbyRequest):
     return {"message": f"{username} left the lobby."}
 
 @app.post("/lobbies/{lobby_id}/add-bot")
-async def add_bot(lobby_id: UUID, req: AddBotRequest):
+async def add_bot(lobby_id: str, req: AddBotRequest):  # Changed from UUID to str
     if lobby_id not in lobbies:
         raise HTTPException(404, "Lobby not found")
 
@@ -651,7 +654,7 @@ async def add_bot(lobby_id: UUID, req: AddBotRequest):
     return {"message": f"{bot_name} added to lobby", "bot_count": len(lobby_bots[lobby_id])}
 
 @app.post("/lobbies/{lobby_id}/trivia-answer")
-async def submit_trivia_answer(lobby_id: UUID, req: TriviaAnswerRequest):
+async def submit_trivia_answer(lobby_id: str, req: TriviaAnswerRequest):  # Changed from UUID to str
     if lobby_id not in lobbies:
         raise HTTPException(404, "Lobby not found")
 
@@ -710,10 +713,10 @@ async def list_available_bots():
     }
 
 # -----------------------------------------------------------------------------
-# WebSocket (Updated)
+# WebSocket (Fixed)
 # -----------------------------------------------------------------------------
 @app.websocket("/ws/{lobby_id}/{user_id}")
-async def ws_endpoint(websocket: WebSocket, lobby_id: UUID, user_id: str):
+async def ws_endpoint(websocket: WebSocket, lobby_id: str, user_id: str):  # Changed from UUID to str
     # Accept connection
     await websocket.accept()
 
@@ -837,7 +840,7 @@ async def ws_endpoint(websocket: WebSocket, lobby_id: UUID, user_id: str):
             # Schedule cleanup after 5 minutes of inactivity
             asyncio.create_task(cleanup_empty_lobby(lobby_id))
 
-async def cleanup_empty_lobby(lobby_id: UUID):
+async def cleanup_empty_lobby(lobby_id: str):  # Changed from UUID to str
     """Clean up empty lobbies after delay"""
     await asyncio.sleep(300)  # Wait 5 minutes
     
@@ -860,18 +863,18 @@ async def cleanup_empty_lobby(lobby_id: UUID):
         logger.info(f"Cleaned up empty lobby: {lobby_id}")
 
 # -----------------------------------------------------------------------------
-# Additional API Endpoints for Flutter Integration
+# Additional API Endpoints for Flutter Integration (Fixed)
 # -----------------------------------------------------------------------------
 
 @app.get("/lobbies/{lobby_id}/info")
-async def get_lobby_info(lobby_id: UUID):
+async def get_lobby_info(lobby_id: str):  # Changed from UUID to str
     """Get detailed lobby information for Flutter app"""
     if lobby_id not in lobbies:
         raise HTTPException(404, "Lobby not found")
     
     lobby = lobbies[lobby_id]
     return {
-        "lobby_id": str(lobby_id),
+        "lobby_id": lobby_id,
         "name": lobby["name"],
         "users": lobby["users"],
         "active_users": list(active_users.get(lobby_id, set())),
@@ -892,7 +895,7 @@ async def get_lobby_info(lobby_id: UUID):
     }
 
 @app.post("/lobbies/{lobby_id}/remove-bot")
-async def remove_bot(lobby_id: UUID, req: AddBotRequest):
+async def remove_bot(lobby_id: str, req: AddBotRequest):  # Changed from UUID to str
     """Remove a bot from the lobby"""
     if lobby_id not in lobbies:
         raise HTTPException(404, "Lobby not found")
@@ -917,7 +920,7 @@ async def remove_bot(lobby_id: UUID, req: AddBotRequest):
         raise HTTPException(404, "Bot not found in lobby")
 
 @app.get("/lobbies/{lobby_id}/messages/recent")
-async def get_recent_messages(lobby_id: UUID, limit: int = 50):
+async def get_recent_messages(lobby_id: str, limit: int = 50):  # Changed from UUID to str
     """Get recent messages for lobby (useful for reconnection)"""
     if lobby_id not in lobbies:
         raise HTTPException(404, "Lobby not found")
@@ -925,9 +928,71 @@ async def get_recent_messages(lobby_id: UUID, limit: int = 50):
     # In a real app, you'd store messages in a database
     # For now, return empty as messages are only live via WebSocket
     return {
-        "lobby_id": str(lobby_id),
+        "lobby_id": lobby_id,
         "messages": [],
         "note": "Messages are real-time only via WebSocket in this demo"
+    }
+
+# -----------------------------------------------------------------------------
+# User Management Endpoints
+# -----------------------------------------------------------------------------
+@app.get("/users/{user_id}")
+async def get_user_info(user_id: str):
+    """Get user information"""
+    try:
+        username = get_username(user_id)
+        user_data = users[username]
+        return {
+            "user_id": user_id,
+            "username": username,
+            "created_at": user_data.get("created_at")
+        }
+    except HTTPException:
+        raise HTTPException(404, "User not found")
+
+@app.delete("/users/{user_id}")
+async def delete_user(user_id: str):
+    """Delete a user account"""
+    try:
+        username = get_username(user_id)
+        
+        # Remove user from all lobbies
+        for lobby_id, lobby in lobbies.items():
+            if username in lobby["users"]:
+                lobby["users"].remove(username)
+        
+        # Remove from active users
+        for lobby_id in active_users:
+            active_users[lobby_id].discard(username)
+        
+        # Delete user
+        del users[username]
+        
+        return {"message": f"User {username} deleted successfully"}
+    except HTTPException:
+        raise HTTPException(404, "User not found")
+
+# -----------------------------------------------------------------------------
+# Statistics Endpoints
+# -----------------------------------------------------------------------------
+@app.get("/stats")
+async def get_stats():
+    """Get server statistics"""
+    total_messages = sum(lobby_message_counts.values())
+    active_lobbies = len([lid for lid, users_set in active_users.items() if len(users_set) > 0])
+    
+    return {
+        "total_users": len(users),
+        "total_lobbies": len(lobbies),
+        "active_lobbies": active_lobbies,
+        "total_messages": total_messages,
+        "total_bots": sum(len(bots) for bots in lobby_bots.values()),
+        "trivia_rounds_active": sum(1 for active in lobby_trivia_active.values() if active),
+        "ai_providers": {
+            "huggingface": bool(HUGGINGFACE_API_KEY),
+            "ollama": USE_LOCAL_OLLAMA,
+            "enhanced_rules": True
+        }
     }
 
 # -----------------------------------------------------------------------------
