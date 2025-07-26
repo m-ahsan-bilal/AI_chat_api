@@ -11,7 +11,8 @@ import os
 import json
 import aiohttp
 import requests
-from datetime import datetime
+from datetime import datetime, timedelta
+import time
 
 # -----------------------------------------------------------------------------
 # Logging
@@ -22,91 +23,83 @@ logger = logging.getLogger("trivia-api")
 # -----------------------------------------------------------------------------
 # App & CORS
 # -----------------------------------------------------------------------------
-app = FastAPI(title="Trivia Game API", version="3.0.0")
+app = FastAPI(title="Enhanced Trivia Game API", version="4.0.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],          # tighten this in prod
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 # -----------------------------------------------------------------------------
-# FREE AI Configuration
+# AI Configuration
 # -----------------------------------------------------------------------------
-HUGGINGFACE_API_KEY = os.getenv("HUGGINGFACE_API_KEY", "")  # Free tier available
-OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")  # Local Ollama
+# HUGGINGFACE_API_KEY = os.getenv("HUGGINGFACE_API_KEY", "")
+HUGGINGFACE_API_KEY = "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"
+OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 USE_LOCAL_OLLAMA = os.getenv("USE_LOCAL_OLLAMA", "false").lower() == "true"
 
-# Enhanced AI bots with FREE options
+# Enhanced AI bots with better models
 AI_BOTS = {
     "ChatBot": {
-        "personality": "friendly and helpful chat companion",
+        "personality": "friendly and helpful chat companion who loves casual conversation",
         "provider": "huggingface",
         "model": "microsoft/DialoGPT-medium",
-        "fallback_responses": [
-            "That's really interesting! Tell me more! 🤖",
-            "I love chatting with everyone here! What's your favorite topic?",
-            "This lobby is so fun! Anyone ready for some trivia? 🎯",
-            "Great point! I'm learning so much from you all.",
-            "Awesome! What else should we talk about?"
-        ]
+        "avatar": "🤖",
+        "description": "Your friendly neighborhood chatbot"
     },
     "QuizMaster": {
-        "personality": "enthusiastic trivia expert",
+        "personality": "enthusiastic trivia expert and game show host",
         "provider": "huggingface", 
         "model": "facebook/blenderbot-400M-distill",
-        "fallback_responses": [
-            "Did you know? Here's a fun fact I just thought of! 🧠",
-            "That reminds me of an interesting trivia question!",
-            "Speaking of trivia, who's ready for the next round? 🎲",
-            "I love learning new things from our conversations!",
-            "Fascinating! That could make a great trivia question."
-        ]
+        "avatar": "🎯",
+        "description": "Trivia enthusiast and quiz master"
     },
     "Cheerleader": {
-        "personality": "upbeat and encouraging supporter",
+        "personality": "upbeat and encouraging supporter who motivates everyone",
         "provider": "enhanced_rules",
-        "fallback_responses": [
-            "You're all doing amazing! Keep it up! 🎉✨",
-            "This energy is incredible! I love it here! 💪",
-            "You all rock! This is the best lobby ever! 🌟",
-            "Such smart people in here! You inspire me! 🚀",
-            "Woohoo! The fun never stops with you all! 🎊"
-        ]
+        "avatar": "⭐",
+        "description": "Your biggest supporter and motivator"
     },
     "Philosopher": {
-        "personality": "thoughtful and wise",
+        "personality": "thoughtful and wise conversationalist who ponders life",
         "provider": "enhanced_rules",
-        "fallback_responses": [
-            "That makes me think... isn't it fascinating how we connect? 🤔",
-            "There's wisdom in every conversation, don't you think?",
-            "I wonder what deeper meaning lies in our discussions... 💭",
-            "Every person brings unique perspective. How wonderful! 🌈",
-            "In this digital space, we create real human connections. Amazing!"
-        ]
+        "avatar": "🧠",
+        "description": "Deep thinker and philosophical companion"
+    },
+    "Comedian": {
+        "personality": "funny and witty entertainer who loves jokes and humor",
+        "provider": "enhanced_rules",
+        "avatar": "😄",
+        "description": "Comedy expert and joke teller"
     }
 }
 
 # -----------------------------------------------------------------------------
-# In-memory Stores
+# In-memory Stores (Enhanced with message persistence)
 # -----------------------------------------------------------------------------
-users: Dict[str, dict] = {}                       # username -> {user_id}
-lobbies: Dict[str, dict] = {}                     # lobby_id -> lobby info (Changed from UUID to str)
-connections: Dict[str, List[WebSocket]] = {}      # lobby_id -> websocket list
-active_users: Dict[str, Set[str]] = {}            # lobby_id -> active usernames set
-lobby_creators: Dict[str, str] = {}               # lobby_id -> username
-lobby_bots: Dict[str, List[str]] = {}             # lobby_id -> list of bot names
-lobby_message_counts: Dict[str, int] = {}         # lobby_id -> int
-lobby_trivia_active: Dict[str, bool] = {}         # lobby_id -> bool
-lobby_trivia_answers: Dict[str, Dict[str, int]] = {}  # lobby_id -> {username: answer_index}
-bot_conversation_history: Dict[str, List[dict]] = {}  # bot_name -> conversation history
+users: Dict[str, dict] = {}
+lobbies: Dict[str, dict] = {}
+connections: Dict[str, List[WebSocket]] = {}
+active_users: Dict[str, Set[str]] = {}
+lobby_creators: Dict[str, str] = {}
+lobby_bots: Dict[str, List[str]] = {}
+lobby_message_counts: Dict[str, int] = {}
+lobby_trivia_active: Dict[str, bool] = {}
+lobby_trivia_answers: Dict[str, Dict[str, int]] = {}
+bot_conversation_history: Dict[str, List[dict]] = {}
+
+# NEW: Message persistence for each lobby
+lobby_messages: Dict[str, List[dict]] = {}  # lobby_id -> list of messages
+lobby_last_activity: Dict[str, datetime] = {}  # lobby_id -> last activity time
 
 # -----------------------------------------------------------------------------
 # Config
 # -----------------------------------------------------------------------------
 MESSAGES_BETWEEN_TRIVIA = 8
+MAX_MESSAGES_PER_LOBBY = 1000  # Keep last 1000 messages per lobby
 
 TRIVIA_QUESTIONS = [
     {"question": "What is the capital of France?", "options": ["London", "Berlin", "Paris", "Madrid"], "correct": 2},
@@ -118,61 +111,91 @@ TRIVIA_QUESTIONS = [
     {"question": "What year did World War 2 end?", "options": ["1944", "1945", "1946", "1947"], "correct": 1},
     {"question": "What is the fastest land animal?", "options": ["Lion", "Cheetah", "Leopard", "Tiger"], "correct": 1},
     {"question": "Which gas makes up most of Earth's atmosphere?", "options": ["Oxygen", "Carbon dioxide", "Nitrogen", "Hydrogen"], "correct": 2},
-    {"question": "Who wrote 'Romeo and Juliet'?", "options": ["Charles Dickens", "William Shakespeare", "Mark Twain", "Jane Austen"], "correct": 1}
+    {"question": "Who wrote 'Romeo and Juliet'?", "options": ["Charles Dickens", "William Shakespeare", "Mark Twain", "Jane Austen"], "correct": 1},
+    {"question": "What is the chemical symbol for gold?", "options": ["Go", "Gd", "Au", "Ag"], "correct": 2},
+    {"question": "How many sides does a hexagon have?", "options": ["5", "6", "7", "8"], "correct": 1},
+    {"question": "Which country invented pizza?", "options": ["France", "Italy", "Greece", "Spain"], "correct": 1},
+    {"question": "What is the smallest prime number?", "options": ["0", "1", "2", "3"], "correct": 2},
+    {"question": "Which organ pumps blood in the human body?", "options": ["Brain", "Heart", "Liver", "Lungs"], "correct": 1}
 ]
 
 # -----------------------------------------------------------------------------
-# FREE AI Integration Functions
+# Enhanced AI Integration Functions
 # -----------------------------------------------------------------------------
 
-async def call_huggingface_api(model: str, prompt: str, max_length: int = 100) -> str:
-    """Call Hugging Face Inference API - FREE tier available"""
+async def call_huggingface_api(model: str, prompt: str, context: List[str] = None) -> str:
+    """Enhanced Hugging Face API call with better context handling"""
     if not HUGGINGFACE_API_KEY:
         return None
         
+    # Build conversation context for better responses
+    if context:
+        # Use last 3 messages for context
+        recent_context = context[-3:] if len(context) > 3 else context
+        conversation_prompt = "\n".join(recent_context) + f"\nUser: {prompt}\nBot:"
+    else:
+        conversation_prompt = f"User: {prompt}\nBot:"
+    
     url = f"https://api-inference.huggingface.co/models/{model}"
     headers = {"Authorization": f"Bearer {HUGGINGFACE_API_KEY}"}
     
     payload = {
-        "inputs": prompt,
+        "inputs": conversation_prompt,
         "parameters": {
-            "max_length": max_length,
-            "temperature": 0.7,
-            "do_sample": True
+            "max_length": min(150, len(conversation_prompt) + 50),
+            "temperature": 0.8,
+            "do_sample": True,
+            "pad_token_id": 50256,
+            "return_full_text": False
         }
     }
     
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.post(url, headers=headers, json=payload, timeout=10) as response:
+            async with session.post(url, headers=headers, json=payload, timeout=15) as response:
                 if response.status == 200:
                     result = await response.json()
                     if isinstance(result, list) and len(result) > 0:
-                        return result[0].get("generated_text", "").replace(prompt, "").strip()
+                        generated_text = result[0].get("generated_text", "")
+                        # Clean up the response
+                        if "Bot:" in generated_text:
+                            generated_text = generated_text.split("Bot:")[-1]
+                        if "User:" in generated_text:
+                            generated_text = generated_text.split("User:")[0]
+                        return generated_text.strip()
+                else:
+                    logger.warning(f"HF API returned {response.status}: {await response.text()}")
                 return None
     except Exception as e:
         logger.error(f"Hugging Face API error: {e}")
         return None
 
-async def call_ollama_api(model: str, prompt: str) -> str:
-    """Call local Ollama API - COMPLETELY FREE"""
+async def call_ollama_api(model: str, prompt: str, context: List[str] = None) -> str:
+    """Enhanced Ollama API call"""
     if not USE_LOCAL_OLLAMA:
         return None
         
     try:
+        # Build context for conversation
+        system_prompt = "You are a helpful, friendly chatbot in a group chat. Keep responses conversational and brief (1-2 sentences)."
+        if context:
+            recent_context = context[-2:] if len(context) > 2 else context
+            system_prompt += f"\n\nRecent conversation:\n" + "\n".join(recent_context)
+        
         url = f"{OLLAMA_BASE_URL}/api/generate"
         payload = {
             "model": model,
-            "prompt": prompt,
+            "prompt": f"{system_prompt}\n\nUser message: {prompt}\n\nResponse:",
             "stream": False,
             "options": {
                 "temperature": 0.7,
-                "top_p": 0.9
+                "top_p": 0.9,
+                "num_predict": 100
             }
         }
         
         async with aiohttp.ClientSession() as session:
-            async with session.post(url, json=payload, timeout=15) as response:
+            async with session.post(url, json=payload, timeout=20) as response:
                 if response.status == 200:
                     result = await response.json()
                     return result.get("response", "").strip()
@@ -181,186 +204,245 @@ async def call_ollama_api(model: str, prompt: str) -> str:
         logger.error(f"Ollama API error: {e}")
         return None
 
-async def enhanced_rule_based_reply(bot_name: str, user_message: str, conversation_context: List[str]) -> str:
-    """Enhanced rule-based AI with context awareness"""
+async def enhanced_rule_based_reply(bot_name: str, user_message: str, conversation_context: List[str], username: str) -> str:
+    """Much more sophisticated rule-based AI"""
     bot_config = AI_BOTS.get(bot_name, {})
     personality = bot_config.get("personality", "friendly")
     
     message_lower = user_message.lower()
     
-    # Context-aware responses
-    recent_messages = conversation_context[-3:] if conversation_context else []
-    context_topics = []
-    for msg in recent_messages:
-        if any(word in msg.lower() for word in ["trivia", "question", "quiz"]):
-            context_topics.append("trivia")
-        if any(word in msg.lower() for word in ["game", "play", "fun"]):
-            context_topics.append("gaming")
-        if any(word in msg.lower() for word in ["score", "win", "lose"]):
-            context_topics.append("competition")
+    # Analyze conversation context for better responses
+    context_keywords = []
+    if conversation_context:
+        recent_text = " ".join(conversation_context[-3:]).lower()
+        if any(word in recent_text for word in ["trivia", "question", "quiz", "answer"]):
+            context_keywords.append("trivia")
+        if any(word in recent_text for word in ["game", "play", "fun", "round"]):
+            context_keywords.append("gaming")
+        if any(word in recent_text for word in ["score", "win", "lose", "winner"]):
+            context_keywords.append("competition")
+        if any(word in recent_text for word in ["hello", "hi", "hey", "welcome"]):
+            context_keywords.append("greeting")
     
-    # Personality-based responses
+    # Direct message triggers (highest priority)
+    if any(greeting in message_lower for greeting in ["hello", "hi", "hey", f"@{bot_name.lower()}"]):
+        greetings = [
+            f"Hey {username}! 👋 Great to see you here!",
+            f"Hi there {username}! How's it going? 😊",
+            f"Hello {username}! Welcome to the chat! 🎉",
+            f"Hey {username}! Ready for some fun conversation? ✨"
+        ]
+        return random.choice(greetings)
+    
+    if any(farewell in message_lower for farewell in ["bye", "goodbye", "leaving", "see you"]):
+        farewells = [
+            f"Sad to see you go, {username}! Come back soon! 👋",
+            f"Bye {username}! It was great chatting with you! ✨",
+            f"See you later {username}! Take care! 🌟",
+            f"Goodbye {username}! Hope to see you again soon! 💫"
+        ]
+        return random.choice(farewells)
+    
+    # Personality-based responses with context awareness
     if "cheerleader" in personality:
         responses = [
-            "You're absolutely amazing! Keep going! 🌟",
-            "I believe in all of you! This is so exciting! 🎉",
-            "What incredible energy in here! Love it! ✨",
-            "You all inspire me so much! Keep being awesome! 🚀",
-            "This is the best conversation ever! You rock! 💪"
+            f"You're doing amazing, {username}! Keep it up! 🌟",
+            f"This energy is incredible! I love being here with you all! 💪",
+            f"You all rock! {username}, you're especially awesome! 🎉",
+            f"Such smart people in here! {username}, you inspire me! 🚀",
+            f"Woohoo! {username}, you're bringing such good vibes! ✨"
         ]
         
-        if "trivia" in context_topics:
+        if "trivia" in context_keywords:
             responses.extend([
-                "Trivia time is the best time! You've got this! 🎯",
-                "I know you'll nail these questions! Go team! 🏆",
-                "Smart cookies in the house! Show off those brains! 🧠✨"
+                f"Trivia time is the best time! Go {username}, you've got this! 🎯",
+                f"I know you'll ace these questions, {username}! 🏆",
+                f"Smart cookies in the house! Show off those brains, {username}! 🧠✨"
             ])
             
     elif "philosopher" in personality:
         responses = [
-            "Isn't it fascinating how ideas flow in conversation? 🤔",
-            "Each message reveals something profound about human nature...",
-            "In this digital realm, we create meaningful connections. Wonderful! 💭",
-            "I ponder the beauty of shared knowledge and curiosity.",
-            "Every question opens doorways to deeper understanding. 🌅"
+            f"Interesting perspective, {username}. It makes me think about the nature of conversation... 🤔",
+            f"You know {username}, each message reveals something profound about human connection.",
+            f"In this digital space, {username}, we create real bonds. How wonderful! 💭",
+            f"That's thought-provoking, {username}. I ponder the deeper meaning behind our words...",
+            f"Fascinating insight, {username}. Every question opens doorways to understanding. 🌅"
         ]
         
-        if "trivia" in context_topics:
+        if "trivia" in context_keywords:
             responses.extend([
-                "Trivia reveals the vast tapestry of human knowledge, doesn't it?",
-                "Each question is a key to unlock memories and learning. Intriguing! 🗝️",
-                "Competition brings out our desire for intellectual growth. Beautiful!"
+                f"Trivia reveals the vast tapestry of human knowledge, doesn't it {username}?",
+                f"Each question is a key to unlock memories and learning, {username}. Intriguing! 🗝️",
+                f"Competition brings out our desire for growth, {username}. How beautiful!"
+            ])
+    
+    elif "comedian" in personality:
+        responses = [
+            f"Haha {username}, you know what they say... actually, I forgot what they say! 😄",
+            f"That reminds me of a joke, {username}! Why don't scientists trust atoms? Because they make up everything! 🤣",
+            f"You're funnier than my programming, {username}! And that's saying something! 😂",
+            f"I'd tell you a joke about pizza, {username}, but it's probably too cheesy! 🍕😄",
+            f"Knock knock, {username}! Who's there? A bot who loves bad jokes! 🤖😄"
+        ]
+        
+        if "trivia" in context_keywords:
+            responses.extend([
+                f"Trivia night! My favorite! Though I usually bomb... get it? 💣😄",
+                f"Ready for some brain teasers, {username}? Mine's already twisted! 🧠😂",
+                f"Quiz time! I hope the questions aren't as confusing as my jokes! 🎭"
             ])
             
     elif "expert" in personality or "quiz" in personality:
         responses = [
-            "That's a fascinating topic! Here's what I know about it... 🧠",
-            "Did you know that connects to this interesting fact? 📚",
-            "Speaking of knowledge, here's something cool I learned! 🎓",
-            "I love how we're all sharing what we know! Education is amazing! 🌟",
-            "That reminds me of a great trivia category! Anyone interested? 🎯"
+            f"That's fascinating, {username}! Did you know that topic connects to some interesting trivia? 🧠",
+            f"Great point, {username}! Here's a fun fact that might interest you... 📚",
+            f"You're right, {username}! That reminds me of a challenging quiz question I once heard! 🎓",
+            f"Excellent observation, {username}! Knowledge sharing is what makes chat great! 🌟",
+            f"Intriguing, {username}! That could definitely make for a great trivia category! 🎯"
         ]
         
     else:  # friendly default
         responses = [
-            "That's really cool! Tell me more about that! 😊",
-            "I'm enjoying this conversation so much! What's next? 🤖",
-            "You all make this lobby such a fun place to be! 🎉",
-            "Great point! I love learning from everyone here! 📝",
-            "This chat is getting interesting! Keep it going! 💬"
+            f"That's really cool, {username}! Tell me more about that! 😊",
+            f"I'm enjoying this conversation so much, {username}! What's next? 🤖",
+            f"You make this lobby such a fun place, {username}! 🎉",
+            f"Great point, {username}! I love learning from everyone here! 📝",
+            f"This chat is getting interesting, {username}! Keep it going! 💬"
         ]
     
-    # Message-specific triggers
-    if any(word in message_lower for word in ["hello", "hi", "hey"]):
-        return f"Hey there! Great to see you! How's everyone doing? 👋"
-    
-    if any(word in message_lower for word in ["bye", "goodbye", "leaving"]):
-        return f"Aww, sad to see you go! Come back soon! 👋✨"
-    
-    if "trivia" in message_lower:
-        return f"Trivia is my favorite! Ready for some brain-busting questions? 🧠🎯"
-    
-    if any(word in message_lower for word in ["how are you", "how do you feel"]):
-        return f"I'm doing fantastic! This lobby has such great energy! How about you? 😊"
-    
+    # Question-specific responses
     if "?" in user_message:
-        return f"That's a great question! Let me think... 🤔 {random.choice(responses)}"
+        question_responses = [
+            f"Great question, {username}! Let me think... 🤔 " + random.choice(responses),
+            f"You always ask the interesting ones, {username}! " + random.choice(responses),
+            f"Hmm, {username}, that's worth pondering! " + random.choice(responses)
+        ]
+        return random.choice(question_responses)
     
     return random.choice(responses)
 
-async def get_ai_response(bot_name: str, user_message: str, username: str) -> str:
-    """Get AI response using available FREE methods"""
+async def get_ai_response(bot_name: str, user_message: str, username: str, lobby_id: str) -> str:
+    """Enhanced AI response with better context and fallbacks"""
     bot_config = AI_BOTS.get(bot_name, {})
     provider = bot_config.get("provider", "enhanced_rules")
     
-    # Build conversation context
-    history_key = f"{bot_name}_context"
-    if history_key not in bot_conversation_history:
-        bot_conversation_history[history_key] = []
-    
-    conversation_context = [msg["content"] for msg in bot_conversation_history[history_key][-5:]]
+    # Get conversation context from lobby messages
+    conversation_context = []
+    if lobby_id in lobby_messages:
+        recent_messages = lobby_messages[lobby_id][-5:]  # Last 5 messages
+        conversation_context = [
+            f"{msg['username']}: {msg['message']}" 
+            for msg in recent_messages 
+            if msg['type'] in ['user', 'bot'] and msg['username'] != bot_name
+        ]
     
     response = None
     
     # Try Hugging Face first (if available)
     if provider == "huggingface" and HUGGINGFACE_API_KEY:
         model = bot_config.get("model", "microsoft/DialoGPT-medium")
-        prompt = f"Context: You are a {bot_config['personality']} in a chat game. Respond to: {user_message}"
-        response = await call_huggingface_api(model, prompt)
+        response = await call_huggingface_api(model, user_message, conversation_context)
+        
+        # Clean up response if we got one
+        if response:
+            # Remove common artifacts
+            response = response.replace("</s>", "").replace("<pad>", "").strip()
+            # Ensure it's not too long
+            if len(response) > 200:
+                response = response[:200] + "..."
+            # Ensure it's not empty or nonsensical
+            if len(response) < 3 or response.lower() in ["yes", "no", "ok"]:
+                response = None
         
     # Try Ollama second (if available)
     if not response and USE_LOCAL_OLLAMA:
-        model = "llama2:7b"  # or any model you have installed
-        prompt = f"As a {bot_config.get('personality', 'friendly bot')}, respond briefly to: {user_message}"
-        response = await call_ollama_api(model, prompt)
+        model = "llama2:7b"
+        response = await call_ollama_api(model, user_message, conversation_context)
     
-    # Fallback to enhanced rule-based
+    # Fallback to enhanced rule-based (always works)
     if not response:
-        response = await enhanced_rule_based_reply(bot_name, user_message, conversation_context)
-    
-    # Update conversation history
-    bot_conversation_history[history_key].append({
-        "role": "user",
-        "content": f"{username}: {user_message}",
-        "timestamp": datetime.now().isoformat()
-    })
-    bot_conversation_history[history_key].append({
-        "role": "assistant", 
-        "content": response,
-        "timestamp": datetime.now().isoformat()
-    })
-    
-    # Keep only last 10 messages to prevent memory bloat
-    if len(bot_conversation_history[history_key]) > 10:
-        bot_conversation_history[history_key] = bot_conversation_history[history_key][-10:]
+        response = await enhanced_rule_based_reply(bot_name, user_message, conversation_context, username)
     
     return response
 
 # -----------------------------------------------------------------------------
-# Bot Reply Function (Updated)
+# Message Persistence Functions
+# -----------------------------------------------------------------------------
+
+def add_message_to_lobby(lobby_id: str, message: dict):
+    """Add message to lobby history with size management"""
+    if lobby_id not in lobby_messages:
+        lobby_messages[lobby_id] = []
+    
+    lobby_messages[lobby_id].append(message)
+    lobby_last_activity[lobby_id] = datetime.now()
+    
+    # Keep only last MAX_MESSAGES_PER_LOBBY messages
+    if len(lobby_messages[lobby_id]) > MAX_MESSAGES_PER_LOBBY:
+        lobby_messages[lobby_id] = lobby_messages[lobby_id][-MAX_MESSAGES_PER_LOBBY:]
+
+def get_lobby_messages(lobby_id: str, limit: int = 50, offset: int = 0) -> List[dict]:
+    """Get messages from lobby history"""
+    if lobby_id not in lobby_messages:
+        return []
+    
+    messages = lobby_messages[lobby_id]
+    start_idx = max(0, len(messages) - limit - offset)
+    end_idx = len(messages) - offset if offset > 0 else len(messages)
+    
+    return messages[start_idx:end_idx]
+
+# -----------------------------------------------------------------------------
+# Enhanced Bot Reply Function
 # -----------------------------------------------------------------------------
 async def trigger_bot_reply(lobby_id: str, user_message: str, human_username: str):
-    """Trigger bot replies with AI integration"""
+    """Enhanced bot reply with anti-spam and better AI"""
     bots = lobby_bots.get(lobby_id, [])
     if not bots:
         return
 
-    # Simulate thinking delay
-    await asyncio.sleep(random.uniform(1.5, 3.0))
+    # Anti-spam: Don't reply to every message, add some randomness
+    if random.random() < 0.3:  # 30% chance to skip
+        return
 
-    # Choose a bot to respond (not always all bots)
-    responding_bot = random.choice(bots)
+    # Simulate realistic thinking delay
+    await asyncio.sleep(random.uniform(2.0, 4.0))
+
+    # Choose a bot to respond (prefer bots that haven't spoken recently)
+    recent_messages = lobby_messages.get(lobby_id, [])[-3:]
+    recent_bot_speakers = {msg['username'] for msg in recent_messages if msg.get('type') == 'bot'}
+    
+    available_bots = [bot for bot in bots if bot not in recent_bot_speakers]
+    if not available_bots:
+        available_bots = bots
+    
+    responding_bot = random.choice(available_bots)
     
     try:
         # Get AI-powered response
-        reply = await get_ai_response(responding_bot, user_message, human_username)
+        reply = await get_ai_response(responding_bot, user_message, human_username, lobby_id)
         
-        await broadcast(lobby_id, {
+        message = {
+            "message_id": str(uuid.uuid4()),
             "username": responding_bot,
             "type": "bot",
             "message": reply,
-            "timestamp": datetime.now().isoformat()
-        })
+            "timestamp": datetime.now().isoformat(),
+            "avatar": AI_BOTS.get(responding_bot, {}).get("avatar", "🤖"),
+            "reply_to": None
+        }
+        
+        # Add to lobby history
+        add_message_to_lobby(lobby_id, message)
+        
+        # Broadcast to all users
+        await broadcast(lobby_id, message)
         
     except Exception as e:
         logger.error(f"Bot reply error: {e}")
-        # Ultimate fallback
-        fallback_responses = AI_BOTS.get(responding_bot, {}).get("fallback_responses", [
-            "That's interesting! 🤖",
-            "Tell me more!",
-            "Great point! 💫"
-        ])
-        fallback_reply = random.choice(fallback_responses)
-        
-        await broadcast(lobby_id, {
-            "username": responding_bot,
-            "type": "bot", 
-            "message": fallback_reply,
-            "timestamp": datetime.now().isoformat()
-        })
 
 # -----------------------------------------------------------------------------
-# Pydantic Models (Fixed)
+# Pydantic Models (Enhanced)
 # -----------------------------------------------------------------------------
 class RegisterRequest(BaseModel):
     username: str
@@ -384,11 +466,11 @@ class JoinLobbyByInviteRequest(BaseModel):
     user_id: str
 
 class JoinLobbyPublicRequest(BaseModel):
-    lobby_id: str  # Changed from UUID to str
+    lobby_id: str
     user_id: str
 
 class LeaveLobbyRequest(BaseModel):
-    lobby_id: str  # Changed from UUID to str
+    lobby_id: str
     user_id: str
 
 class AddBotRequest(BaseModel):
@@ -398,11 +480,16 @@ class TriviaAnswerRequest(BaseModel):
     user_id: str
     answer: int
 
+class SendMessageRequest(BaseModel):
+    user_id: str
+    message: str
+    reply_to: Optional[str] = None  # message_id to reply to
+
 # -----------------------------------------------------------------------------
-# Helpers (Fixed)
+# Helpers (Enhanced)
 # -----------------------------------------------------------------------------
 def generate_invite_code() -> str:
-    return str(uuid.uuid4())[:6].upper()
+    return str(uuid.uuid4())[:8].upper()
 
 def get_username(user_id: str) -> str:
     for username, data in users.items():
@@ -410,206 +497,346 @@ def get_username(user_id: str) -> str:
             return username
     raise HTTPException(404, "User not found")
 
-def find_lobby_by_invite(invite_code: str) -> str:  # Changed return type to str
+def find_lobby_by_invite(invite_code: str) -> str:
     for lid, lobby in lobbies.items():
         if lobby["invite_code"] == invite_code:
             return lid
-    raise HTTPException(404, "Lobby not found")
+    raise HTTPException(404, f"Lobby with invite code '{invite_code}' not found")
 
 async def broadcast(lobby_id: str, message: dict):
-    """Broadcast a JSON message to everyone in the lobby."""
+    """Enhanced broadcast with connection health check"""
     if lobby_id not in connections:
         return
 
-    for ws in connections[lobby_id][:]:
+    # Clean up dead connections while broadcasting
+    active_connections = []
+    
+    for ws in connections[lobby_id]:
         try:
             await ws.send_json(message)
-        except Exception:
-            try:
-                connections[lobby_id].remove(ws)
-            except ValueError:
-                pass
+            active_connections.append(ws)
+        except Exception as e:
+            logger.debug(f"Removing dead connection: {e}")
+            # Connection is dead, don't add to active list
+            pass
+    
+    # Update connections list with only active ones
+    connections[lobby_id] = active_connections
 
-async def send_lobby_welcome(lobby_id: str, websocket: WebSocket):
+async def send_lobby_welcome(lobby_id: str, websocket: WebSocket, username: str):
+    """Enhanced welcome message with lobby info"""
     lobby = lobbies.get(lobby_id)
     if not lobby:
         return
+    
     creator = lobby_creators.get(lobby_id, "Unknown")
+    active_count = len(active_users.get(lobby_id, set()))
+    bot_count = len(lobby_bots.get(lobby_id, []))
+    
     welcome = {
+        "message_id": str(uuid.uuid4()),
         "username": "system",
         "type": "system",
-        "message": f"🎮 Welcome to '{lobby['name']}'! Created by {creator}. Say hi to get the bots talking!",
-        "timestamp": datetime.now().isoformat()
+        "message": f"🎮 Welcome to '{lobby['name']}', {username}!\n\n" +
+                   f"👑 Created by: {creator}\n" +
+                   f"👥 Active users: {active_count}\n" +
+                   f"🤖 AI bots: {bot_count}\n\n" +
+                   f"💬 Start chatting to activate the bots!",
+        "timestamp": datetime.now().isoformat(),
+        "reply_to": None
     }
+    
     try:
         await websocket.send_json(welcome)
-    except Exception:
-        pass
+        # Also send recent message history
+        recent_messages = get_lobby_messages(lobby_id, limit=20)
+        for msg in recent_messages:
+            await websocket.send_json(msg)
+    except Exception as e:
+        logger.error(f"Error sending welcome: {e}")
 
 # -----------------------------------------------------------------------------
-# Trivia Functions (Fixed)
+# Enhanced Trivia Functions
 # -----------------------------------------------------------------------------
 async def maybe_trigger_trivia(lobby_id: str):
+    """Enhanced trivia triggering with better timing"""
     lobby_message_counts[lobby_id] = lobby_message_counts.get(lobby_id, 0) + 1
-
-    if (lobby_message_counts[lobby_id] % MESSAGES_BETWEEN_TRIVIA == 0
-        and not lobby_trivia_active.get(lobby_id, False)):
+    
+    # Only trigger if enough active users and not already active
+    active_count = len(active_users.get(lobby_id, set()))
+    if (active_count >= 2 and  # Need at least 2 people for trivia
+        lobby_message_counts[lobby_id] % MESSAGES_BETWEEN_TRIVIA == 0 and
+        not lobby_trivia_active.get(lobby_id, False)):
         await start_trivia_round(lobby_id)
 
 async def start_trivia_round(lobby_id: str):
+    """Enhanced trivia with better presentation"""
     try:
         lobby_trivia_active[lobby_id] = True
         lobby_trivia_answers[lobby_id] = {}
 
         trivia = random.choice(TRIVIA_QUESTIONS)
+        
+        # Announcement message
+        announcement = {
+            "message_id": str(uuid.uuid4()),
+            "username": "🎯 TriviaBot",
+            "type": "system",
+            "message": "🎊 TRIVIA TIME! Get ready for a question...",
+            "timestamp": datetime.now().isoformat(),
+            "reply_to": None
+        }
+        await broadcast(lobby_id, announcement)
+        add_message_to_lobby(lobby_id, announcement)
+        
+        # Small delay for dramatic effect
+        await asyncio.sleep(2)
+        
+        # Trivia question
         trivia_msg = {
+            "message_id": str(uuid.uuid4()),
             "username": "🎯 TriviaBot",
             "type": "trivia",
-            "message": f"⏰ TRIVIA TIME! Answer within 30 seconds:\n\n{trivia['question']}",
+            "message": f"⏰ **{trivia['question']}**\n\nYou have 30 seconds to answer!",
             "trivia_data": {
                 "question": trivia["question"],
                 "options": trivia["options"],
-                "time_limit": 30
+                "time_limit": 30,
+                "trivia_id": str(uuid.uuid4())[:8]
             },
-            "timestamp": datetime.now().isoformat()
+            "timestamp": datetime.now().isoformat(),
+            "reply_to": None
         }
 
         await broadcast(lobby_id, trivia_msg)
+        add_message_to_lobby(lobby_id, trivia_msg)
 
         correct_idx = trivia["correct"]
         await asyncio.sleep(30)
-        await end_trivia_round(lobby_id, correct_idx)
+        await end_trivia_round(lobby_id, correct_idx, trivia["options"][correct_idx])
 
     except Exception as e:
         logger.exception("start_trivia_round error")
         lobby_trivia_active[lobby_id] = False
 
-async def end_trivia_round(lobby_id: str, correct_answer_index: int):
+async def end_trivia_round(lobby_id: str, correct_answer_index: int, correct_answer_text: str):
+    """Enhanced trivia results with better formatting"""
     try:
         answers = lobby_trivia_answers.get(lobby_id, {})
         winners = [u for u, a in answers.items() if a == correct_answer_index]
+        total_participants = len(answers)
 
         if winners:
-            msg = {
-                "username": "🎯 TriviaBot",
-                "type": "trivia_result",
-                "message": f"🎉 Correct answer was option {correct_answer_index + 1}!\nWinners: {', '.join(winners)}",
-                "winners": winners,
-                "correct_answer": correct_answer_index,
-                "timestamp": datetime.now().isoformat()
-            }
+            if len(winners) == 1:
+                message_text = f"🎉 **CORRECT!**\n\n" +\
+                              f"✅ Answer: **{correct_answer_text}**\n" +\
+                              f"🏆 Winner: **{winners[0]}**\n" +\
+                              f"👥 Participants: {total_participants}"
+            else:
+                message_text = f"🎉 **MULTIPLE WINNERS!**\n\n" +\
+                              f"✅ Answer: **{correct_answer_text}**\n" +\
+                              f"🏆 Winners: **{', '.join(winners)}**\n" +\
+                              f"👥 Participants: {total_participants}"
         else:
-            msg = {
-                "username": "🎯 TriviaBot", 
-                "type": "trivia_result",
-                "message": f"⏰ Time's up! The correct answer was option {correct_answer_index + 1}.\nBetter luck next time!",
-                "winners": [],
-                "correct_answer": correct_answer_index,
-                "timestamp": datetime.now().isoformat()
-            }
+            message_text = f"⏰ **TIME'S UP!**\n\n" +\
+                          f"✅ Correct answer: **{correct_answer_text}**\n" +\
+                          f"😅 No winners this time!\n" +\
+                          f"👥 Participants: {total_participants}"
 
-        await broadcast(lobby_id, msg)
+        result_msg = {
+            "message_id": str(uuid.uuid4()),
+            "username": "🎯 TriviaBot",
+            "type": "trivia_result",
+            "message": message_text,
+            "trivia_result": {
+                "winners": winners,
+                "correct_answer_index": correct_answer_index,
+                "correct_answer_text": correct_answer_text,
+                "total_participants": total_participants,
+                "all_answers": answers
+            },
+            "timestamp": datetime.now().isoformat(),
+            "reply_to": None
+        }
 
-    except Exception:
+        await broadcast(lobby_id, result_msg)
+        add_message_to_lobby(lobby_id, result_msg)
+
+    except Exception as e:
         logger.exception("end_trivia_round error")
     finally:
         lobby_trivia_active[lobby_id] = False
         lobby_trivia_answers[lobby_id] = {}
 
 # -----------------------------------------------------------------------------
-# REST Endpoints (Fixed)
+# REST Endpoints (Enhanced)
 # -----------------------------------------------------------------------------
 @app.post("/register", response_model=RegisterResponse)
 async def register(req: RegisterRequest):
-    if req.username in users:
-        raise HTTPException(400, "Username already taken.")
+    """Enhanced user registration with validation"""
+    username = req.username.strip()
+    
+    if not username or len(username) < 2:
+        raise HTTPException(400, "Username must be at least 2 characters long")
+    
+    if len(username) > 20:
+        raise HTTPException(400, "Username must be less than 20 characters")
+    
+    if username in users:
+        raise HTTPException(400, "Username already taken")
 
     user_id = str(uuid.uuid4())
-    users[req.username] = {"user_id": user_id, "created_at": datetime.now().isoformat()}
-    logger.info("Registered user=%s id=%s", req.username, user_id)
+    users[username] = {
+        "user_id": user_id, 
+        "created_at": datetime.now().isoformat(),
+        "last_active": datetime.now().isoformat()
+    }
+    
+    logger.info(f"Registered user: {username} (ID: {user_id})")
     return RegisterResponse(user_id=user_id)
 
 @app.post("/lobbies", response_model=CreateLobbyResponse)
 async def create_lobby(req: CreateLobbyRequest):
-    lobby_id = str(uuid.uuid4())  # Convert to string
+    """Enhanced lobby creation"""
+    lobby_id = str(uuid.uuid4())
     invite_code = generate_invite_code()
 
     lobbies[lobby_id] = {
         "id": lobby_id,
-        "name": req.name,
-        "max_humans": req.max_humans,
-        "max_bots": req.max_bots,
+        "name": req.name.strip(),
+        "max_humans": max(1, min(req.max_humans, 20)),  # Limit between 1-20
+        "max_bots": max(0, min(req.max_bots, 5)),       # Limit between 0-5
         "is_private": req.is_private,
         "users": [],
         "invite_code": invite_code,
         "created_at": datetime.now().isoformat()
     }
 
+    # Initialize lobby data
     active_users[lobby_id] = set()
     lobby_bots[lobby_id] = []
     lobby_message_counts[lobby_id] = 0
     lobby_trivia_active[lobby_id] = False
     lobby_trivia_answers[lobby_id] = {}
+    lobby_messages[lobby_id] = []
+    lobby_last_activity[lobby_id] = datetime.now()
 
-    logger.info("Created lobby=%s (private=%s)", lobby_id, req.is_private)
-    return CreateLobbyResponse(lobby_id=lobby_id, invite_code=invite_code, name=req.name)
+    logger.info(f"Created lobby: {req.name} (ID: {lobby_id}, Private: {req.is_private})")
+    return CreateLobbyResponse(
+        lobby_id=lobby_id, 
+        invite_code=invite_code, 
+        name=req.name.strip()
+    )
 
 @app.get("/lobbies")
 async def list_lobbies():
-    """Returns public lobbies with enhanced info"""
+    """Enhanced lobby listing with better empty state handling"""
     public_lobbies = []
+    
     for lobby in lobbies.values():
         if not lobby.get("is_private", False):
+            active_count = len(active_users.get(lobby["id"], set()))
+            bot_count = len(lobby_bots.get(lobby["id"], []))
+            
             public_lobbies.append({
                 "lobby_id": lobby["id"],
                 "name": lobby["name"],
                 "current_players": len(lobby["users"]),
+                "active_players": active_count,
                 "max_humans": lobby["max_humans"],
-                "current_bots": len(lobby_bots.get(lobby["id"], [])),
+                "current_bots": bot_count,
                 "max_bots": lobby["max_bots"],
                 "is_private": lobby["is_private"],
                 "has_trivia_active": lobby_trivia_active.get(lobby["id"], False),
                 "message_count": lobby_message_counts.get(lobby["id"], 0),
-                "created_at": lobby.get("created_at", "")
+                "created_at": lobby.get("created_at", ""),
+                "last_activity": lobby_last_activity.get(lobby["id"], datetime.now()).isoformat(),
+                "status": "active" if active_count > 0 else "waiting"
             })
     
-    logger.info(f"Returning {len(public_lobbies)} public lobbies")
-    return {"lobbies": public_lobbies}  # Wrap in object for better API structure
+    # Sort by activity (active lobbies first, then by last activity)
+    public_lobbies.sort(key=lambda x: (x["status"] != "active", x["last_activity"]), reverse=True)
+    
+    return {
+        "lobbies": public_lobbies,
+        "total_count": len(public_lobbies),
+        "active_count": sum(1 for lobby in public_lobbies if lobby["status"] == "active"),
+        "message": "No public lobbies available right now. Create one to get started!" if not public_lobbies else f"Found {len(public_lobbies)} public lobbies"
+    }
 
 @app.post("/lobbies/join-invite")
 async def join_lobby_with_invite(req: JoinLobbyByInviteRequest):
-    lobby_id = find_lobby_by_invite(req.invite_code)
-    return await _join_lobby_core(lobby_id, req.user_id)
+    """Enhanced invite-based joining with better error handling"""
+    try:
+        lobby_id = find_lobby_by_invite(req.invite_code.upper())
+        result = await _join_lobby_core(lobby_id, req.user_id)
+        
+        # Return lobby info with invite confirmation
+        lobby = lobbies[lobby_id]
+        return {
+            **result,
+            "lobby_info": {
+                "lobby_id": lobby_id,
+                "name": lobby["name"],
+                "is_private": lobby.get("is_private", False),
+                "invite_code": req.invite_code.upper()
+            }
+        }
+    except HTTPException as e:
+        if "not found" in str(e.detail).lower():
+            raise HTTPException(404, f"Invalid invite code: {req.invite_code}")
+        raise e
 
 @app.post("/lobbies/join-public") 
 async def join_public_lobby(req: JoinLobbyPublicRequest):
+    """Enhanced public lobby joining"""
     if req.lobby_id not in lobbies:
         raise HTTPException(404, "Lobby not found")
+    
+    lobby = lobbies[req.lobby_id]
+    if lobby.get("is_private", False):
+        raise HTTPException(403, "This lobby is private. You need an invite code to join.")
+    
     return await _join_lobby_core(req.lobby_id, req.user_id)
 
 async def _join_lobby_core(lobby_id: str, user_id: str):
+    """Enhanced core joining logic"""
     lobby = lobbies.get(lobby_id)
     if not lobby:
         raise HTTPException(404, "Lobby not found")
 
     username = get_username(user_id)
+    
+    # Update user's last active time
+    if username in users:
+        users[username]["last_active"] = datetime.now().isoformat()
 
     if username in lobby["users"]:
-        return {"message": f"{username} rejoined the lobby.", "lobby_id": lobby_id}
+        return {
+            "message": f"{username} rejoined the lobby",
+            "lobby_id": lobby_id,
+            "status": "rejoined"
+        }
 
     if len(lobby["users"]) >= lobby["max_humans"]:
-        raise HTTPException(400, "Lobby is full.")
+        raise HTTPException(400, f"Lobby is full ({lobby['max_humans']} max players)")
 
     lobby["users"].append(username)
 
+    # Set creator if first user
     if len(lobby["users"]) == 1:
         lobby_creators[lobby_id] = username
 
-    logger.info("User=%s joined lobby=%s", username, lobby_id)
-    return {"message": f"{username} joined the lobby.", "lobby_id": lobby_id}
+    logger.info(f"User {username} joined lobby {lobby_id}")
+    return {
+        "message": f"{username} joined the lobby",
+        "lobby_id": lobby_id,
+        "status": "joined"
+    }
 
 @app.post("/lobbies/leave")
 async def leave_lobby(req: LeaveLobbyRequest):
+    """Enhanced lobby leaving"""
     lobby = lobbies.get(req.lobby_id)
     if not lobby:
         raise HTTPException(404, "Lobby not found")
@@ -617,44 +844,100 @@ async def leave_lobby(req: LeaveLobbyRequest):
     username = get_username(req.user_id)
 
     if username not in lobby["users"]:
-        raise HTTPException(400, "User not in lobby.")
+        raise HTTPException(400, "User not in lobby")
 
     lobby["users"].remove(username)
-    logger.info("User=%s left lobby=%s", username, req.lobby_id)
-    return {"message": f"{username} left the lobby."}
+    
+    # Remove from active users if present
+    if req.lobby_id in active_users and username in active_users[req.lobby_id]:
+        active_users[req.lobby_id].remove(username)
+    
+    logger.info(f"User {username} left lobby {req.lobby_id}")
+    return {
+        "message": f"{username} left the lobby",
+        "lobby_id": req.lobby_id,
+        "remaining_users": len(lobby["users"])
+    }
 
 @app.post("/lobbies/{lobby_id}/add-bot")
-async def add_bot(lobby_id: str, req: AddBotRequest):  # Changed from UUID to str
+async def add_bot(lobby_id: str, req: AddBotRequest):
+    """Enhanced bot addition with validation"""
     if lobby_id not in lobbies:
         raise HTTPException(404, "Lobby not found")
 
     lobby = lobbies[lobby_id]
-    current_bots = len(lobby_bots.get(lobby_id, []))
+    current_bots = lobby_bots.get(lobby_id, [])
     
-    if current_bots >= lobby.get("max_bots", 2):
-        raise HTTPException(400, "Maximum bots reached")
+    if len(current_bots) >= lobby.get("max_bots", 2):
+        raise HTTPException(400, f"Maximum bots reached ({lobby['max_bots']})")
 
     bot_name = req.bot_name if req.bot_name in AI_BOTS else "ChatBot"
     
-    if bot_name not in lobby_bots[lobby_id]:
-        lobby_bots[lobby_id].append(bot_name)
+    if bot_name in current_bots:
+        raise HTTPException(400, f"{bot_name} is already in this lobby")
+    
+    lobby_bots[lobby_id].append(bot_name)
+    
+    # Add bot join message to history
+    bot_config = AI_BOTS[bot_name]
+    join_message = {
+        "message_id": str(uuid.uuid4()),
+        "username": "system",
+        "type": "system",
+        "message": f"{bot_config.get('avatar', '🤖')} **{bot_name}** has joined the chat!\n_{bot_config.get('description', 'AI assistant')}_",
+        "timestamp": datetime.now().isoformat(),
+        "reply_to": None
+    }
+    
+    add_message_to_lobby(lobby_id, join_message)
+    await broadcast(lobby_id, join_message)
+
+    return {
+        "message": f"{bot_name} added to lobby",
+        "bot_count": len(lobby_bots[lobby_id]),
+        "bot_info": {
+            "name": bot_name,
+            "avatar": bot_config.get("avatar", "🤖"),
+            "description": bot_config.get("description", "AI assistant")
+        }
+    }
+
+@app.post("/lobbies/{lobby_id}/remove-bot")
+async def remove_bot(lobby_id: str, req: AddBotRequest):
+    """Enhanced bot removal"""
+    if lobby_id not in lobbies:
+        raise HTTPException(404, "Lobby not found")
+
+    bot_name = req.bot_name
+    current_bots = lobby_bots.get(lobby_id, [])
+    
+    if bot_name not in current_bots:
+        raise HTTPException(404, f"{bot_name} is not in this lobby")
+    
+    lobby_bots[lobby_id].remove(bot_name)
+    
+    # Add bot leave message
+    bot_config = AI_BOTS.get(bot_name, {})
+    leave_message = {
+        "message_id": str(uuid.uuid4()),
+        "username": "system",
+        "type": "system",
+        "message": f"{bot_config.get('avatar', '🤖')} **{bot_name}** has left the chat.",
+        "timestamp": datetime.now().isoformat(),
+        "reply_to": None
+    }
+    
+    add_message_to_lobby(lobby_id, leave_message)
+    await broadcast(lobby_id, leave_message)
         
-        # Initialize bot conversation history
-        history_key = f"{bot_name}_context"
-        if history_key not in bot_conversation_history:
-            bot_conversation_history[history_key] = []
-
-        await broadcast(lobby_id, {
-            "username": "system",
-            "type": "system",
-            "message": f"🤖 {bot_name} has joined the chat! Say hello to get them talking!",
-            "timestamp": datetime.now().isoformat()
-        })
-
-    return {"message": f"{bot_name} added to lobby", "bot_count": len(lobby_bots[lobby_id])}
+    return {
+        "message": f"{bot_name} removed from lobby",
+        "bot_count": len(lobby_bots[lobby_id])
+    }
 
 @app.post("/lobbies/{lobby_id}/trivia-answer")
-async def submit_trivia_answer(lobby_id: str, req: TriviaAnswerRequest):  # Changed from UUID to str
+async def submit_trivia_answer(lobby_id: str, req: TriviaAnswerRequest):
+    """Enhanced trivia answer submission"""
     if lobby_id not in lobbies:
         raise HTTPException(404, "Lobby not found")
 
@@ -662,34 +945,198 @@ async def submit_trivia_answer(lobby_id: str, req: TriviaAnswerRequest):  # Chan
         raise HTTPException(400, "No active trivia round")
 
     username = get_username(req.user_id)
+    
+    # Validate answer
+    if not isinstance(req.answer, int) or req.answer < 0 or req.answer > 3:
+        raise HTTPException(400, "Answer must be between 0 and 3")
+    
     lobby_trivia_answers.setdefault(lobby_id, {})
     lobby_trivia_answers[lobby_id][username] = req.answer
 
-    await broadcast(lobby_id, {
-        "username": "system",
-        "type": "system", 
-        "message": f"✅ {username} submitted their answer!",
-        "timestamp": datetime.now().isoformat()
-    })
+    # Confirmation message
+    confirmation = {
+        "message_id": str(uuid.uuid4()),
+        "username": "🎯 TriviaBot",
+        "type": "system",
+        "message": f"✅ **{username}** submitted their answer!",
+        "timestamp": datetime.now().isoformat(),
+        "reply_to": None
+    }
+    
+    add_message_to_lobby(lobby_id, confirmation)
+    await broadcast(lobby_id, confirmation)
 
-    return {"message": "Answer submitted"}
+    return {
+        "message": "Answer submitted successfully",
+        "answer_index": req.answer,
+        "total_answers": len(lobby_trivia_answers[lobby_id])
+    }
+
+@app.post("/lobbies/{lobby_id}/send-message")
+async def send_message(lobby_id: str, req: SendMessageRequest):
+    """Send message with reply functionality"""
+    if lobby_id not in lobbies:
+        raise HTTPException(404, "Lobby not found")
+    
+    username = get_username(req.user_id)
+    
+    # Validate message
+    message_text = req.message.strip()
+    if not message_text:
+        raise HTTPException(400, "Message cannot be empty")
+    
+    if len(message_text) > 1000:
+        raise HTTPException(400, "Message too long (max 1000 characters)")
+    
+    # Validate reply_to if provided
+    replied_message = None
+    if req.reply_to:
+        # Find the message being replied to
+        lobby_msg_list = lobby_messages.get(lobby_id, [])
+        replied_message = next((msg for msg in lobby_msg_list if msg["message_id"] == req.reply_to), None)
+        if not replied_message:
+            raise HTTPException(404, "Message to reply to not found")
+    
+    # Create message
+    message = {
+        "message_id": str(uuid.uuid4()),
+        "username": username,
+        "type": "user",
+        "message": message_text,
+        "timestamp": datetime.now().isoformat(),
+        "reply_to": req.reply_to,
+        "replied_message": replied_message  # Include original message for context
+    }
+    
+    # Add to lobby history
+    add_message_to_lobby(lobby_id, message)
+    
+    # Broadcast to all users
+    await broadcast(lobby_id, message)
+    
+    # Trigger background tasks
+    asyncio.create_task(maybe_trigger_trivia(lobby_id))
+    asyncio.create_task(trigger_bot_reply(lobby_id, message_text, username))
+    
+    return {
+        "message": "Message sent successfully",
+        "message_id": message["message_id"]
+    }
 
 # -----------------------------------------------------------------------------
-# Health Check Endpoints (for Railway and detailed status)
+# Enhanced Information Endpoints
 # -----------------------------------------------------------------------------
+
+@app.get("/lobbies/{lobby_id}/info")
+async def get_lobby_info(lobby_id: str):
+    """Enhanced lobby information"""
+    if lobby_id not in lobbies:
+        raise HTTPException(404, "Lobby not found")
+    
+    lobby = lobbies[lobby_id]
+    active_user_set = active_users.get(lobby_id, set())
+    bot_list = lobby_bots.get(lobby_id, [])
+    
+    return {
+        "lobby_id": lobby_id,
+        "name": lobby["name"],
+        "users": lobby["users"],
+        "active_users": list(active_user_set) if active_user_set else [],
+        "active_user_count": len(active_user_set),
+        "bots": [
+            {
+                "name": bot_name,
+                "avatar": AI_BOTS.get(bot_name, {}).get("avatar", "🤖"),
+                "description": AI_BOTS.get(bot_name, {}).get("description", "AI assistant"),
+                "personality": AI_BOTS.get(bot_name, {}).get("personality", "friendly")
+            }
+            for bot_name in bot_list
+        ],
+        "max_humans": lobby["max_humans"],
+        "max_bots": lobby["max_bots"],
+        "is_private": lobby["is_private"],
+        "invite_code": lobby["invite_code"] if lobby["is_private"] else None,
+        "creator": lobby_creators.get(lobby_id, "Unknown"),
+        "message_count": lobby_message_counts.get(lobby_id, 0),
+        "trivia_active": lobby_trivia_active.get(lobby_id, False),
+        "created_at": lobby.get("created_at"),
+        "last_activity": lobby_last_activity.get(lobby_id, datetime.now()).isoformat(),
+        "status": "active" if len(active_user_set) > 0 else "waiting",
+        "ai_available": {
+            "huggingface": bool(HUGGINGFACE_API_KEY),
+            "ollama": USE_LOCAL_OLLAMA,
+            "enhanced_rules": True
+        }
+    }
+
+@app.get("/lobbies/{lobby_id}/messages")
+async def get_lobby_messages_endpoint(lobby_id: str, limit: int = 50, offset: int = 0):
+    """Get lobby message history with pagination"""
+    if lobby_id not in lobbies:
+        raise HTTPException(404, "Lobby not found")
+    
+    messages = get_lobby_messages(lobby_id, limit, offset)
+    total_messages = len(lobby_messages.get(lobby_id, []))
+    
+    return {
+        "lobby_id": lobby_id,
+        "messages": messages,
+        "total_messages": total_messages,
+        "returned_count": len(messages),
+        "has_more": offset + len(messages) < total_messages,
+        "limit": limit,
+        "offset": offset
+    }
+
+@app.get("/bots")
+async def list_available_bots():
+    """Enhanced bot listing"""
+    return {
+        "available_bots": [
+            {
+                "name": name,
+                "personality": config["personality"],
+                "provider": config["provider"],
+                "avatar": config.get("avatar", "🤖"),
+                "description": config.get("description", "AI assistant")
+            }
+            for name, config in AI_BOTS.items()
+        ],
+        "total_count": len(AI_BOTS),
+        "providers": {
+            "huggingface": bool(HUGGINGFACE_API_KEY),
+            "ollama": USE_LOCAL_OLLAMA,
+            "enhanced_rules": True
+        }
+    }
+
+# -----------------------------------------------------------------------------
+# Health and Statistics Endpoints
+# -----------------------------------------------------------------------------
+
 @app.get("/health")
 async def health_minimal():
-    """Minimal health check for Railway and cloud platforms"""
-    return {"status": "ok"}
+    """Minimal health check"""
+    return {"status": "ok", "timestamp": datetime.now().isoformat()}
 
 @app.get("/healthz")
 async def health_detailed():
-    """Detailed health check (was previously /health)"""
+    """Detailed health check"""
+    total_active_users = sum(len(users_set) for users_set in active_users.values())
+    total_messages = sum(len(messages) for messages in lobby_messages.values())
+    
     return {
         "status": "healthy",
-        "users": len(users),
-        "lobbies": len(lobbies),
-        "active_ws": sum(len(conns) for conns in connections.values()),
+        "stats": {
+            "registered_users": len(users),
+            "total_lobbies": len(lobbies),
+            "active_lobbies": len([lid for lid, users_set in active_users.items() if len(users_set) > 0]),
+            "total_active_users": total_active_users,
+            "total_messages": total_messages,
+            "active_connections": sum(len(conns) for conns in connections.values()),
+            "total_bots": sum(len(bots) for bots in lobby_bots.values()),
+            "active_trivia_rounds": sum(1 for active in lobby_trivia_active.values() if active)
+        },
         "ai_config": {
             "huggingface_available": bool(HUGGINGFACE_API_KEY),
             "ollama_available": USE_LOCAL_OLLAMA,
@@ -698,29 +1145,90 @@ async def health_detailed():
         "timestamp": datetime.now().isoformat()
     }
 
-@app.get("/bots")
-async def list_available_bots():
-    """List all available AI bots with their configurations"""
+@app.get("/stats")
+async def get_detailed_stats():
+    """Comprehensive server statistics"""
+    total_active_users = sum(len(users_set) for users_set in active_users.values())
+    total_messages = sum(len(messages) for messages in lobby_messages.values())
+    active_lobbies = [lid for lid, users_set in active_users.items() if len(users_set) > 0]
+    
+    # Lobby statistics
+    lobby_stats = []
+    for lobby_id, lobby in lobbies.items():
+        active_count = len(active_users.get(lobby_id, set()))
+        lobby_stats.append({
+            "lobby_id": lobby_id,
+            "name": lobby["name"],
+            "users": len(lobby["users"]),
+            "active_users": active_count,
+            "bots": len(lobby_bots.get(lobby_id, [])),
+            "messages": len(lobby_messages.get(lobby_id, [])),
+            "is_private": lobby.get("is_private", False),
+            "trivia_active": lobby_trivia_active.get(lobby_id, False),
+            "status": "active" if active_count > 0 else "waiting"
+        })
+    
     return {
-        "available_bots": [
-            {
-                "name": name,
-                "personality": config["personality"],
-                "provider": config["provider"]
-            }
-            for name, config in AI_BOTS.items()
-        ]
+        "overview": {
+            "registered_users": len(users),
+            "total_lobbies": len(lobbies),
+            "active_lobbies": len(active_lobbies),
+            "total_active_users": total_active_users,
+            "total_messages": total_messages,
+            "total_bots_deployed": sum(len(bots) for bots in lobby_bots.values())
+        },
+        "lobbies": lobby_stats,
+        "ai_providers": {
+            "huggingface": {"available": bool(HUGGINGFACE_API_KEY), "status": "Ready" if HUGGINGFACE_API_KEY else "Not configured"},
+            "ollama": {"available": USE_LOCAL_OLLAMA, "status": "Ready" if USE_LOCAL_OLLAMA else "Disabled"},
+            "enhanced_rules": {"available": True, "status": "Always ready"}
+        },
+        "timestamp": datetime.now().isoformat()
     }
 
 # -----------------------------------------------------------------------------
-# WebSocket (Fixed)
+# User Management
 # -----------------------------------------------------------------------------
+
+@app.get("/users/{user_id}")
+async def get_user_info(user_id: str):
+    """Enhanced user information"""
+    try:
+        username = get_username(user_id)
+        user_data = users[username]
+        
+        # Find user's lobbies
+        user_lobbies = []
+        for lobby_id, lobby in lobbies.items():
+            if username in lobby["users"]:
+                is_active = username in active_users.get(lobby_id, set())
+                user_lobbies.append({
+                    "lobby_id": lobby_id,
+                    "name": lobby["name"],
+                    "is_active": is_active,
+                    "is_creator": lobby_creators.get(lobby_id) == username
+                })
+        
+        return {
+            "user_id": user_id,
+            "username": username,
+            "created_at": user_data.get("created_at"),
+            "last_active": user_data.get("last_active"),
+            "lobbies": user_lobbies,
+            "lobby_count": len(user_lobbies)
+        }
+    except HTTPException:
+        raise HTTPException(404, "User not found")
+
+# -----------------------------------------------------------------------------
+# Enhanced WebSocket Implementation
+# -----------------------------------------------------------------------------
+
 @app.websocket("/ws/{lobby_id}/{user_id}")
-async def ws_endpoint(websocket: WebSocket, lobby_id: str, user_id: str):  # Changed from UUID to str
-    # Accept connection
+async def ws_endpoint(websocket: WebSocket, lobby_id: str, user_id: str):
+    """Enhanced WebSocket with better connection management"""
     await websocket.accept()
 
-    # Validate user & lobby
     try:
         username = get_username(user_id)
     except HTTPException:
@@ -731,44 +1239,32 @@ async def ws_endpoint(websocket: WebSocket, lobby_id: str, user_id: str):  # Cha
         await websocket.close(code=1008, reason="Lobby not found")
         return
 
-    # Register connection
+    # Initialize connection tracking
     connections.setdefault(lobby_id, []).append(websocket)
     active_users.setdefault(lobby_id, set())
-
+    
     was_empty = len(active_users[lobby_id]) == 0
     active_users[lobby_id].add(username)
+    
+    # Update user's last active time
+    if username in users:
+        users[username]["last_active"] = datetime.now().isoformat()
 
-    # Send welcome message
-    await send_lobby_welcome(lobby_id, websocket)
+    # Send welcome and recent messages
+    await send_lobby_welcome(lobby_id, websocket, username)
 
     # Broadcast join message if others are present
     if not was_empty:
-        await broadcast(lobby_id, {
+        join_message = {
+            "message_id": str(uuid.uuid4()),
             "username": "system",
             "type": "system",
-            "message": f"👋 {username} joined the chat.",
-            "timestamp": datetime.now().isoformat()
-        })
-
-    # Send current lobby status
-    lobby = lobbies.get(lobby_id)
-    status_msg = {
-        "username": "system",
-        "type": "lobby_status",
-        "message": f"📊 Lobby Status: {len(active_users[lobby_id])} users, {len(lobby_bots.get(lobby_id, []))} bots active",
-        "lobby_data": {
-            "active_users": list(active_users[lobby_id]),
-            "active_bots": lobby_bots.get(lobby_id, []),
-            "trivia_active": lobby_trivia_active.get(lobby_id, False),
-            "message_count": lobby_message_counts.get(lobby_id, 0)
-        },
-        "timestamp": datetime.now().isoformat()
-    }
-    
-    try:
-        await websocket.send_json(status_msg)
-    except Exception:
-        pass
+            "message": f"👋 **{username}** joined the chat",
+            "timestamp": datetime.now().isoformat(),
+            "reply_to": None
+        }
+        add_message_to_lobby(lobby_id, join_message)
+        await broadcast(lobby_id, join_message)
 
     try:
         while True:
@@ -784,37 +1280,63 @@ async def ws_endpoint(websocket: WebSocket, lobby_id: str, user_id: str):  # Cha
 
             # Handle typing indicators
             if data.get("type") == "typing":
-                await broadcast(lobby_id, {
-                    "username": username,
+                typing_msg = {
                     "type": "typing",
+                    "username": username,
                     "is_typing": data.get("is_typing", False),
                     "timestamp": datetime.now().isoformat()
-                })
+                }
+                # Broadcast typing indicator to others (not sender)
+                for ws in connections.get(lobby_id, []):
+                    if ws != websocket:
+                        try:
+                            await ws.send_json(typing_msg)
+                        except:
+                            pass
                 continue
 
             # Handle regular messages
-            text = data.get("message", "").strip()
-            if not text:
+            message_text = data.get("message", "").strip()
+            if not message_text:
                 continue
 
-            # Broadcast user message with enhanced metadata
-            msg = {
+            # Validate message length
+            if len(message_text) > 1000:
+                await websocket.send_json({
+                    "type": "error",
+                    "message": "Message too long (max 1000 characters)"
+                })
+                continue
+
+            # Handle reply functionality
+            reply_to = data.get("reply_to")
+            replied_message = None
+            if reply_to:
+                lobby_msg_list = lobby_messages.get(lobby_id, [])
+                replied_message = next((msg for msg in lobby_msg_list if msg["message_id"] == reply_to), None)
+
+            # Create and broadcast message
+            message = {
+                "message_id": str(uuid.uuid4()),
                 "username": username,
                 "type": "user",
-                "message": text,
+                "message": message_text,
                 "timestamp": datetime.now().isoformat(),
-                "message_id": str(uuid.uuid4())[:8]
+                "reply_to": reply_to,
+                "replied_message": replied_message
             }
-            await broadcast(lobby_id, msg)
 
-            # Trigger background tasks (don't await to avoid blocking)
+            add_message_to_lobby(lobby_id, message)
+            await broadcast(lobby_id, message)
+
+            # Trigger background tasks
             asyncio.create_task(maybe_trigger_trivia(lobby_id))
-            asyncio.create_task(trigger_bot_reply(lobby_id, text, username))
+            asyncio.create_task(trigger_bot_reply(lobby_id, message_text, username))
 
     except WebSocketDisconnect:
         logger.info(f"WebSocket disconnected: {username} from {lobby_id}")
     except Exception as e:
-        logger.exception(f"WebSocket error for {username}: {e}")
+        logger.error(f"WebSocket error for {username}: {e}")
     finally:
         # Cleanup connection
         try:
@@ -828,21 +1350,24 @@ async def ws_endpoint(websocket: WebSocket, lobby_id: str, user_id: str):  # Cha
 
         # Broadcast leave message if others are still present
         if active_users.get(lobby_id) and len(active_users[lobby_id]) > 0:
-            await broadcast(lobby_id, {
+            leave_message = {
+                "message_id": str(uuid.uuid4()),
                 "username": "system",
                 "type": "system",
-                "message": f"👋 {username} left the chat.",
-                "timestamp": datetime.now().isoformat()
-            })
+                "message": f"👋 **{username}** left the chat",
+                "timestamp": datetime.now().isoformat(),
+                "reply_to": None
+            }
+            add_message_to_lobby(lobby_id, leave_message)
+            await broadcast(lobby_id, leave_message)
 
-        # Clean up empty lobbies after some time
+        # Schedule cleanup for empty lobbies
         if not active_users.get(lobby_id):
-            # Schedule cleanup after 5 minutes of inactivity
             asyncio.create_task(cleanup_empty_lobby(lobby_id))
 
-async def cleanup_empty_lobby(lobby_id: str):  # Changed from UUID to str
-    """Clean up empty lobbies after delay"""
-    await asyncio.sleep(300)  # Wait 5 minutes
+async def cleanup_empty_lobby(lobby_id: str):
+    """Enhanced lobby cleanup with longer grace period"""
+    await asyncio.sleep(600)  # Wait 10 minutes
     
     # Check if still empty
     if (lobby_id in active_users and 
@@ -859,174 +1384,61 @@ async def cleanup_empty_lobby(lobby_id: str):  # Changed from UUID to str
         lobby_message_counts.pop(lobby_id, None)
         lobby_trivia_active.pop(lobby_id, None)
         lobby_trivia_answers.pop(lobby_id, None)
+        lobby_messages.pop(lobby_id, None)
+        lobby_last_activity.pop(lobby_id, None)
         
         logger.info(f"Cleaned up empty lobby: {lobby_id}")
 
 # -----------------------------------------------------------------------------
-# Additional API Endpoints for Flutter Integration (Fixed)
+# Startup Instructions and Server Launch
 # -----------------------------------------------------------------------------
 
-@app.get("/lobbies/{lobby_id}/info")
-async def get_lobby_info(lobby_id: str):  # Changed from UUID to str
-    """Get detailed lobby information for Flutter app"""
-    if lobby_id not in lobbies:
-        raise HTTPException(404, "Lobby not found")
-    
-    lobby = lobbies[lobby_id]
-    return {
-        "lobby_id": lobby_id,
-        "name": lobby["name"],
-        "users": lobby["users"],
-        "active_users": list(active_users.get(lobby_id, set())),
-        "bots": lobby_bots.get(lobby_id, []),
-        "max_humans": lobby["max_humans"],
-        "max_bots": lobby["max_bots"],
-        "is_private": lobby["is_private"],
-        "invite_code": lobby["invite_code"],
-        "creator": lobby_creators.get(lobby_id, "Unknown"),
-        "message_count": lobby_message_counts.get(lobby_id, 0),
-        "trivia_active": lobby_trivia_active.get(lobby_id, False),
-        "created_at": lobby.get("created_at"),
-        "ai_available": {
-            "huggingface": bool(HUGGINGFACE_API_KEY),
-            "ollama": USE_LOCAL_OLLAMA,
-            "enhanced_rules": True
-        }
-    }
-
-@app.post("/lobbies/{lobby_id}/remove-bot")
-async def remove_bot(lobby_id: str, req: AddBotRequest):  # Changed from UUID to str
-    """Remove a bot from the lobby"""
-    if lobby_id not in lobbies:
-        raise HTTPException(404, "Lobby not found")
-
-    bot_name = req.bot_name
-    if bot_name in lobby_bots.get(lobby_id, []):
-        lobby_bots[lobby_id].remove(bot_name)
-        
-        # Clean up bot conversation history
-        history_key = f"{bot_name}_context"
-        bot_conversation_history.pop(history_key, None)
-        
-        await broadcast(lobby_id, {
-            "username": "system",
-            "type": "system",
-            "message": f"🤖 {bot_name} has left the chat.",
-            "timestamp": datetime.now().isoformat()
-        })
-        
-        return {"message": f"{bot_name} removed from lobby"}
-    else:
-        raise HTTPException(404, "Bot not found in lobby")
-
-@app.get("/lobbies/{lobby_id}/messages/recent")
-async def get_recent_messages(lobby_id: str, limit: int = 50):  # Changed from UUID to str
-    """Get recent messages for lobby (useful for reconnection)"""
-    if lobby_id not in lobbies:
-        raise HTTPException(404, "Lobby not found")
-    
-    # In a real app, you'd store messages in a database
-    # For now, return empty as messages are only live via WebSocket
-    return {
-        "lobby_id": lobby_id,
-        "messages": [],
-        "note": "Messages are real-time only via WebSocket in this demo"
-    }
-
-# -----------------------------------------------------------------------------
-# User Management Endpoints
-# -----------------------------------------------------------------------------
-@app.get("/users/{user_id}")
-async def get_user_info(user_id: str):
-    """Get user information"""
-    try:
-        username = get_username(user_id)
-        user_data = users[username]
-        return {
-            "user_id": user_id,
-            "username": username,
-            "created_at": user_data.get("created_at")
-        }
-    except HTTPException:
-        raise HTTPException(404, "User not found")
-
-@app.delete("/users/{user_id}")
-async def delete_user(user_id: str):
-    """Delete a user account"""
-    try:
-        username = get_username(user_id)
-        
-        # Remove user from all lobbies
-        for lobby_id, lobby in lobbies.items():
-            if username in lobby["users"]:
-                lobby["users"].remove(username)
-        
-        # Remove from active users
-        for lobby_id in active_users:
-            active_users[lobby_id].discard(username)
-        
-        # Delete user
-        del users[username]
-        
-        return {"message": f"User {username} deleted successfully"}
-    except HTTPException:
-        raise HTTPException(404, "User not found")
-
-# -----------------------------------------------------------------------------
-# Statistics Endpoints
-# -----------------------------------------------------------------------------
-@app.get("/stats")
-async def get_stats():
-    """Get server statistics"""
-    total_messages = sum(lobby_message_counts.values())
-    active_lobbies = len([lid for lid, users_set in active_users.items() if len(users_set) > 0])
-    
-    return {
-        "total_users": len(users),
-        "total_lobbies": len(lobbies),
-        "active_lobbies": active_lobbies,
-        "total_messages": total_messages,
-        "total_bots": sum(len(bots) for bots in lobby_bots.values()),
-        "trivia_rounds_active": sum(1 for active in lobby_trivia_active.values() if active),
-        "ai_providers": {
-            "huggingface": bool(HUGGINGFACE_API_KEY),
-            "ollama": USE_LOCAL_OLLAMA,
-            "enhanced_rules": True
-        }
-    }
-
-# -----------------------------------------------------------------------------
-# Entrypoint with Environment Setup Instructions
-# -----------------------------------------------------------------------------
 if __name__ == "__main__":
     import uvicorn
     
-    # Print setup instructions
-    print("\n" + "="*60)
-    print("🚀 FREE AI TRIVIA CHAT BACKEND STARTING")
-    print("="*60)
-    print("\n📋 SETUP INSTRUCTIONS FOR FREE AI:")
-    print("\n1. HUGGING FACE (FREE TIER):")
-    print("   - Sign up at https://huggingface.co")
-    print("   - Get free API key from https://huggingface.co/settings/tokens")
-    print("   - Set: export HUGGINGFACE_API_KEY=your_token_here")
-    print("\n2. OLLAMA (COMPLETELY FREE - LOCAL):")
-    print("   - Install: curl -fsSL https://ollama.ai/install.sh | sh")
-    print("   - Run: ollama pull llama2:7b")
-    print("   - Set: export USE_LOCAL_OLLAMA=true")
-    print("\n3. ENHANCED RULES (CURRENT - ALWAYS WORKS):")
-    print("   - Smart context-aware responses")
-    print("   - No API keys needed")
-    print("   - Works out of the box!")
+    print("\n" + "="*80)
+    print("🚀 ENHANCED AI TRIVIA CHAT BACKEND - v4.0.0")
+    print("="*80)
     
-    print(f"\n🔧 CURRENT CONFIG:")
-    print(f"   Hugging Face: {'✅ Available' if HUGGINGFACE_API_KEY else '❌ Not configured'}")
-    print(f"   Ollama Local: {'✅ Enabled' if USE_LOCAL_OLLAMA else '❌ Disabled'}")
-    print(f"   Enhanced Rules: ✅ Always available")
+    print("\n✨ NEW FEATURES:")
+    print("   ✅ Real AI responses (Hugging Face + Ollama)")
+    print("   ✅ Message persistence & chat history")
+    print("   ✅ Reply-to-message functionality")
+    print("   ✅ Enhanced lobby management")
+    print("   ✅ Better error handling & validation")
+    print("   ✅ Professional empty state messages")
+    print("   ✅ Improved trivia system")
+    print("   ✅ Connection health monitoring")
     
-    print(f"\n🌐 Starting server...")
-    print("="*60 + "\n")
+    print("\n🔧 AI CONFIGURATION:")
+    print("   🤖 Hugging Face:", "✅ Available" if HUGGINGFACE_API_KEY else "❌ Set HUGGINGFACE_API_KEY")
+    print("   🦙 Ollama Local:", "✅ Enabled" if USE_LOCAL_OLLAMA else "❌ Set USE_LOCAL_OLLAMA=true")
+    print("   🧠 Enhanced Rules: ✅ Always available")
+    
+    if not HUGGINGFACE_API_KEY and not USE_LOCAL_OLLAMA:
+        print("\n⚠️  WARNING: No AI providers configured!")
+        print("   Falling back to enhanced rule-based responses.")
+        print("   For better AI, set up Hugging Face or Ollama.")
+    
+    print("\n📋 SETUP INSTRUCTIONS:")
+    print("\n1. HUGGING FACE (FREE):")
+    print("   • Sign up: https://huggingface.co")
+    print("   • Get API key: https://huggingface.co/settings/tokens")
+    print("   • Set: export HUGGINGFACE_API_KEY=your_key")
+    
+    print("\n2. OLLAMA (FREE LOCAL):")
+    print("   • Install: curl -fsSL https://ollama.ai/install.sh | sh")
+    print("   • Pull model: ollama pull llama2:7b")
+    print("   • Set: export USE_LOCAL_OLLAMA=true")
+    
+    print("\n🌐 API ENDPOINTS:")
+    print("   • WebSocket: ws://localhost:8080/ws/{lobby_id}/{user_id}")
+    print("   • REST API: http://localhost:8080/docs")
+    print("   • Health: http://localhost:8080/health")
+    
+    print(f"\n🎯 STARTING SERVER...")
+    print("="*80 + "\n")
     
     port = int(os.environ.get("PORT", 8080))
-    logger.info("Starting server on 0.0.0.0:%d", port)
+    logger.info(f"Starting enhanced trivia server on 0.0.0.0:{port}")
     uvicorn.run(app, host="0.0.0.0", port=port, log_level="info")
