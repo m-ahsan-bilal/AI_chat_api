@@ -36,8 +36,7 @@ app.add_middleware(
 # -----------------------------------------------------------------------------
 # AI Configuration
 # -----------------------------------------------------------------------------
-# HUGGINGFACE_API_KEY = os.getenv("HUGGINGFACE_API_KEY", "")
-HUGGINGFACE_API_KEY = "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"
+HUGGINGFACE_API_KEY = os.getenv("HUGGINGFACE_API_KEY", "")
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 USE_LOCAL_OLLAMA = os.getenv("USE_LOCAL_OLLAMA", "false").lower() == "true"
 
