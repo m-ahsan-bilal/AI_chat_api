@@ -51,7 +51,7 @@ AI_BOTS = {
     },
     "QuizMaster": {
         "personality": "enthusiastic trivia expert and game show host",
-        "provider": "huggingface", 
+        "provider": "huggingface",
         "model": "facebook/blenderbot-400M-distill",
         "avatar": "🎯",
         "description": "Trivia enthusiast and quiz master"
@@ -101,21 +101,36 @@ MESSAGES_BETWEEN_TRIVIA = 8
 MAX_MESSAGES_PER_LOBBY = 1000  # Keep last 1000 messages per lobby
 
 TRIVIA_QUESTIONS = [
-    {"question": "What is the capital of France?", "options": ["London", "Berlin", "Paris", "Madrid"], "correct": 2},
-    {"question": "Which planet is closest to the Sun?", "options": ["Venus", "Mercury", "Earth", "Mars"], "correct": 1},
-    {"question": "What is 15 + 27?", "options": ["41", "42", "43", "44"], "correct": 1},
-    {"question": "Who painted the Mona Lisa?", "options": ["Van Gogh", "Picasso", "Da Vinci", "Monet"], "correct": 2},
-    {"question": "What is the largest ocean?", "options": ["Atlantic", "Indian", "Arctic", "Pacific"], "correct": 3},
-    {"question": "How many continents are there?", "options": ["5", "6", "7", "8"], "correct": 2},
-    {"question": "What year did World War 2 end?", "options": ["1944", "1945", "1946", "1947"], "correct": 1},
-    {"question": "What is the fastest land animal?", "options": ["Lion", "Cheetah", "Leopard", "Tiger"], "correct": 1},
-    {"question": "Which gas makes up most of Earth's atmosphere?", "options": ["Oxygen", "Carbon dioxide", "Nitrogen", "Hydrogen"], "correct": 2},
-    {"question": "Who wrote 'Romeo and Juliet'?", "options": ["Charles Dickens", "William Shakespeare", "Mark Twain", "Jane Austen"], "correct": 1},
-    {"question": "What is the chemical symbol for gold?", "options": ["Go", "Gd", "Au", "Ag"], "correct": 2},
-    {"question": "How many sides does a hexagon have?", "options": ["5", "6", "7", "8"], "correct": 1},
-    {"question": "Which country invented pizza?", "options": ["France", "Italy", "Greece", "Spain"], "correct": 1},
-    {"question": "What is the smallest prime number?", "options": ["0", "1", "2", "3"], "correct": 2},
-    {"question": "Which organ pumps blood in the human body?", "options": ["Brain", "Heart", "Liver", "Lungs"], "correct": 1}
+    {"question": "What is the capital of France?", "options": [
+        "London", "Berlin", "Paris", "Madrid"], "correct": 2},
+    {"question": "Which planet is closest to the Sun?", "options": [
+        "Venus", "Mercury", "Earth", "Mars"], "correct": 1},
+    {"question": "What is 15 + 27?",
+        "options": ["41", "42", "43", "44"], "correct": 1},
+    {"question": "Who painted the Mona Lisa?", "options": [
+        "Van Gogh", "Picasso", "Da Vinci", "Monet"], "correct": 2},
+    {"question": "What is the largest ocean?", "options": [
+        "Atlantic", "Indian", "Arctic", "Pacific"], "correct": 3},
+    {"question": "How many continents are there?",
+        "options": ["5", "6", "7", "8"], "correct": 2},
+    {"question": "What year did World War 2 end?", "options": [
+        "1944", "1945", "1946", "1947"], "correct": 1},
+    {"question": "What is the fastest land animal?", "options": [
+        "Lion", "Cheetah", "Leopard", "Tiger"], "correct": 1},
+    {"question": "Which gas makes up most of Earth's atmosphere?", "options": [
+        "Oxygen", "Carbon dioxide", "Nitrogen", "Hydrogen"], "correct": 2},
+    {"question": "Who wrote 'Romeo and Juliet'?", "options": [
+        "Charles Dickens", "William Shakespeare", "Mark Twain", "Jane Austen"], "correct": 1},
+    {"question": "What is the chemical symbol for gold?",
+        "options": ["Go", "Gd", "Au", "Ag"], "correct": 2},
+    {"question": "How many sides does a hexagon have?",
+        "options": ["5", "6", "7", "8"], "correct": 1},
+    {"question": "Which country invented pizza?", "options": [
+        "France", "Italy", "Greece", "Spain"], "correct": 1},
+    {"question": "What is the smallest prime number?",
+        "options": ["0", "1", "2", "3"], "correct": 2},
+    {"question": "Which organ pumps blood in the human body?",
+        "options": ["Brain", "Heart", "Liver", "Lungs"], "correct": 1}
 ]
 
 # -----------------------------------------------------------------------------
@@ -126,7 +141,7 @@ async def call_huggingface_api(model: str, prompt: str, context: List[str] = Non
     """Enhanced Hugging Face API call with better context handling"""
     if not HUGGINGFACE_API_KEY:
         return None
-        
+
     # Build conversation context for better responses
     if context:
         # Use last 3 messages for context
@@ -134,10 +149,10 @@ async def call_huggingface_api(model: str, prompt: str, context: List[str] = Non
         conversation_prompt = "\n".join(recent_context) + f"\nUser: {prompt}\nBot:"
     else:
         conversation_prompt = f"User: {prompt}\nBot:"
-    
+
     url = f"https://api-inference.huggingface.co/models/{model}"
     headers = {"Authorization": f"Bearer {HUGGINGFACE_API_KEY}"}
-    
+
     payload = {
         "inputs": conversation_prompt,
         "parameters": {
@@ -148,27 +163,29 @@ async def call_huggingface_api(model: str, prompt: str, context: List[str] = Non
             "return_full_text": False
         }
     }
-    
+
     try:
         async with aiohttp.ClientSession() as session:
-           async with session.post(url, headers=headers, json=payload, timeout=15) as response:
-    logger.info(f"Hugging Face API status: {response.status}")
-    
-    if response.status == 200:
-        result = await response.json()
-        logger.info(f"Hugging Face API result: {result}")
-        
-        if isinstance(result, list) and len(result) > 0:
-            generated_text = result[0].get("generated_text", "")
+            async with session.post(url, headers=headers, json=payload, timeout=15) as response:
+                logger.info(f"Hugging Face API status: {response.status}")
+
+                if response.status == 200:
+                    result = await response.json()
+                    logger.info(f"Hugging Face API result: {result}")
+
+                    if isinstance(result, list) and len(result) > 0:
+                        generated_text = result[0].get("generated_text", "")
+
                         # Clean up the response
                         if "Bot:" in generated_text:
                             generated_text = generated_text.split("Bot:")[-1]
                         if "User:" in generated_text:
                             generated_text = generated_text.split("User:")[0]
+
                         return generated_text.strip()
-                else:
-                    logger.warning(f"HF API returned {response.status}: {await response.text()}")
-                return None
+                    else:
+                        logger.warning(f"HF API returned {response.status}: {await response.text()}")
+                        return None
     except Exception as e:
         logger.error(f"Hugging Face API error: {e}")
         return None
