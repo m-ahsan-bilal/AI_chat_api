@@ -151,11 +151,15 @@ async def call_huggingface_api(model: str, prompt: str, context: List[str] = Non
     
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.post(url, headers=headers, json=payload, timeout=15) as response:
-                if response.status == 200:
-                    result = await response.json()
-                    if isinstance(result, list) and len(result) > 0:
-                        generated_text = result[0].get("generated_text", "")
+           async with session.post(url, headers=headers, json=payload, timeout=15) as response:
+    logger.info(f"Hugging Face API status: {response.status}")
+    
+    if response.status == 200:
+        result = await response.json()
+        logger.info(f"Hugging Face API result: {result}")
+        
+        if isinstance(result, list) and len(result) > 0:
+            generated_text = result[0].get("generated_text", "")
                         # Clean up the response
                         if "Bot:" in generated_text:
                             generated_text = generated_text.split("Bot:")[-1]
@@ -395,17 +399,32 @@ def get_lobby_messages(lobby_id: str, limit: int = 50, offset: int = 0) -> List[
 # Enhanced Bot Reply Function
 # -----------------------------------------------------------------------------
 async def trigger_bot_reply(lobby_id: str, user_message: str, human_username: str):
-    """Enhanced bot reply with anti-spam and better AI"""
+    """Enhanced bot reply with better responsiveness and debugging"""
     bots = lobby_bots.get(lobby_id, [])
     if not bots:
+        logger.info(f"No bots in lobby {lobby_id}")
         return
 
-    # Anti-spam: Don't reply to every message, add some randomness
-    if random.random() < 0.3:  # 30% chance to skip
+    # Improved response logic - more responsive
+    message_lower = user_message.lower()
+    
+    # Always respond to direct mentions or questions
+    should_respond = any([
+        "?" in user_message,  # Questions
+        any(f"@{bot.lower()}" in message_lower for bot in bots),  # Direct mentions
+        any(greeting in message_lower for greeting in ["hello", "hi", "hey"]),  # Greetings
+        len(user_message.split()) >= 5,  # Longer messages
+        random.random() < 0.7  # 70% chance for other messages (increased from 30%)
+    ])
+    
+    if not should_respond:
+        logger.info(f"Bot skipping response to: '{user_message[:50]}...'")
         return
 
-    # Simulate realistic thinking delay
-    await asyncio.sleep(random.uniform(2.0, 4.0))
+    # Reduced delay for better UX
+    delay = random.uniform(0.5, 1.5)  # Reduced from 2-4 seconds
+    logger.info(f"Bot will respond in {delay:.1f} seconds")
+    await asyncio.sleep(delay)
 
     # Choose a bot to respond (prefer bots that haven't spoken recently)
     recent_messages = lobby_messages.get(lobby_id, [])[-3:]
@@ -1222,6 +1241,33 @@ async def get_user_info(user_id: str):
 # -----------------------------------------------------------------------------
 # Enhanced WebSocket Implementation
 # -----------------------------------------------------------------------------
+
+
+
+# Add debug endpoint to test bot functionality
+@app.get("/debug/bots/{lobby_id}")
+async def debug_bots(lobby_id: str):
+    """Debug endpoint to check bot status"""
+    if lobby_id not in lobbies:
+        raise HTTPException(404, "Lobby not found")
+    
+    bots = lobby_bots.get(lobby_id, [])
+    
+    debug_info = {
+        "lobby_id": lobby_id,
+        "bots_in_lobby": bots,
+        "ai_config": {
+            "huggingface_key_set": bool(HUGGINGFACE_API_KEY),
+            "huggingface_key_length": len(HUGGINGFACE_API_KEY) if HUGGINGFACE_API_KEY else 0,
+            "ollama_enabled": USE_LOCAL_OLLAMA
+        },
+        "recent_messages": get_lobby_messages(lobby_id, limit=5),
+        "message_count": lobby_message_counts.get(lobby_id, 0),
+        "active_users": list(active_users.get(lobby_id, set())),
+        "trivia_active": lobby_trivia_active.get(lobby_id, False)
+    }
+    
+    return debug_info
 
 @app.websocket("/ws/{lobby_id}/{user_id}")
 async def ws_endpoint(websocket: WebSocket, lobby_id: str, user_id: str):
